@@ -25,8 +25,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium
+# Install Playwright browsers with explicit path
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install chromium --with-deps
 RUN playwright install-deps
 
 # Copy application code
@@ -34,6 +35,7 @@ COPY . .
 
 # Set environment variables
 ENV PYTHONPATH=/app
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Expose port
 EXPOSE 8080

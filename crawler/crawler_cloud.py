@@ -134,7 +134,10 @@ def retailer_links() -> dict[str, str]:
 
     # fallback: render gov.il with Playwright
     with sync_playwright() as pw:
-        br = pw.chromium.launch(args=["--ignore-certificate-errors"])
+        br = pw.chromium.launch(
+            args=["--ignore-certificate-errors", "--no-sandbox", "--disable-dev-shm-usage"],
+            headless=True
+        )
         pg = br.new_page(user_agent=UA, locale="he-IL")
         pg.goto(ROOT, timeout=45_000)
         pg.wait_for_selector("tr >> text=מחיר")
@@ -163,7 +166,10 @@ def get_authenticated_session(hub_url: str, creds: dict | None) -> requests.Sess
 
 def playwright_with_login(hub: str, creds: dict | None, shop: str = "retailer"):
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(args=["--ignore-certificate-errors"])
+    browser = pw.chromium.launch(
+        args=["--ignore-certificate-errors", "--no-sandbox", "--disable-dev-shm-usage"],
+        headless=True
+    )
     ctx = browser.new_context(
         ignore_https_errors=True, user_agent=UA, locale="he-IL", accept_downloads=True
     )
@@ -554,6 +560,22 @@ def test_cloud_setup():
     return True
 
 def main():
+    # Check Playwright browser installation
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            # This will fail if browsers aren't installed
+            browser = pw.chromium.launch(
+                args=["--ignore-certificate-errors", "--no-sandbox", "--disable-dev-shm-usage"],
+                headless=True
+            )
+            browser.close()
+        log.info("✅ Playwright browsers are properly installed")
+    except Exception as e:
+        log.error(f"❌ Playwright browser issue: {e}")
+        log.error("Please ensure Playwright browsers are installed: playwright install chromium")
+        return
+    
     # Test cloud setup first
     if not test_cloud_setup():
         log.error("Cloud setup failed, exiting")
