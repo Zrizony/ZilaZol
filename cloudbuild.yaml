@@ -22,7 +22,7 @@ steps:
       - 'managed'
       - '--allow-unauthenticated'
       - '--memory'
-      - '2Gi'
+      - '8Gi'
       - '--timeout'
       - '3600'
       - '--set-env-vars'
