@@ -24,9 +24,11 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install playwright
 
 # Install Playwright browsers with explicit path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps
 RUN playwright install chromium --with-deps
 RUN playwright install-deps
 
