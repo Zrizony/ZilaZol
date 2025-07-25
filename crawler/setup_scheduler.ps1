@@ -33,7 +33,8 @@ gcloud scheduler jobs create http daily-crawler `
     --description="Daily price crawler run at 7 AM Jerusalem time" `
     --time-zone="Asia/Jerusalem" `
     --headers="Content-Type=application/json" `
-    --message-body="{}"
+    --message-body="{}" `
+    --attempt-deadline="1800s"
 
 Write-Host "✅ Daily scheduler created!" -ForegroundColor Green
 Write-Host "The crawler will now run automatically every day at 7 AM (Jerusalem time)" -ForegroundColor Cyan
