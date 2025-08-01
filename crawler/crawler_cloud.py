@@ -37,7 +37,7 @@ PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'civic-ripsaw-466109-e2')
 
 # Fill from gov.il table  (domain → creds)
 CREDS = {
-    'אלמשהדאוי קינג סטור בע"מ': {"username": "doralon"},
+    'דור אלון ניהול מתחמים קמעונאיים בע"מ': {"username": "doralon"},
     'טיב טעם רשתות בע"מ': {"username": "TivTaam"},
     'מ. יוחננוף ובניו (1988) בע"מ': {"username": "yohananof"},
     'מרב-מזון כל בע"מ (אושר עד)': {"username": "osherad"},
@@ -189,6 +189,8 @@ def playwright_with_login(hub: str, creds: dict | None, shop: str = "retailer"):
     # Enhanced login detection
     login_needed = False
     if creds:
+        log.info(f"Checking for login requirements for {shop} with creds: {creds}")
+        
         # Check multiple indicators for login requirement
         login_indicators = [
             # Login forms
@@ -238,6 +240,15 @@ def playwright_with_login(hub: str, creds: dict | None, shop: str = "retailer"):
         if any(x in page.url.lower() for x in ["login", "auth", "signin"]):
             login_needed = True
             log.info(f"Already on login page: {page.url}")
+        
+        # Log current page title and URL for debugging
+        log.info(f"Current page title: {page.title()}")
+        log.info(f"Current page URL: {page.url}")
+        
+        if not login_needed:
+            log.info(f"No login indicators found for {shop}")
+        else:
+            log.info(f"Login needed for {shop}")
     
     # Perform login if needed
     if login_needed and creds:
@@ -367,11 +378,22 @@ def playwright_with_login(hub: str, creds: dict | None, shop: str = "retailer"):
     
     # Take screenshot to temporary file
     temp_screenshot = f"/tmp/{slug(shop_str)}_login.png"
-    page.screenshot(path=temp_screenshot, full_page=True)
-    
-    # Upload screenshot to cloud storage
-    upload_file_to_gcs(BUCKET_NAME, temp_screenshot, screenshot_path)
-    log.info(f"Uploaded login screenshot: {screenshot_path}")
+    try:
+        page.screenshot(path=temp_screenshot, full_page=True)
+        log.info(f"Saved screenshot to: {temp_screenshot}")
+        
+        # Check if file exists before uploading
+        if os.path.exists(temp_screenshot):
+            # Upload screenshot to cloud storage
+            upload_success = upload_file_to_gcs(BUCKET_NAME, temp_screenshot, screenshot_path)
+            if upload_success:
+                log.info(f"Uploaded login screenshot: {screenshot_path}")
+            else:
+                log.error(f"Failed to upload screenshot: {screenshot_path}")
+        else:
+            log.error(f"Screenshot file not found: {temp_screenshot}")
+    except Exception as e:
+        log.error(f"Failed to take screenshot: {e}")
     
     return pw, browser, page
 
