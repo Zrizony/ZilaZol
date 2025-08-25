@@ -1,5 +1,5 @@
-# Use Python 3.11 slim image
-FROM python:3.11-slim
+# Use Python 3.11 slim image (Ubuntu-based)
+FROM python:3.11-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     fonts-liberation \
     fonts-unifont \
-    fonts-ubuntu \
+    ttf-ubuntu-font-family \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -27,9 +27,9 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libxss1 \
     libxtst6 \
-    libgdk-pixbuf-xlib-2.0-0 \
-    libjpeg62-turbo \
-    libwebp7 \
+    libgdk-pixbuf2.0-0 \
+    libjpeg-turbo8 \
+    libwebp6 \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
