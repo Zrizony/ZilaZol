@@ -1,11 +1,14 @@
-# Use Python 3.11 slim image (Ubuntu-based)
-FROM python:3.11-slim-bullseye
+# Use Ubuntu 22.04 with Python 3.11
+FROM ubuntu:22.04
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (minimal but complete)
+# Install Python and system dependencies
 RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-pip \
+    python3.11-venv \
     wget \
     gnupg \
     ca-certificates \
@@ -33,6 +36,10 @@ RUN apt-get update && apt-get install -y \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
+# Create symlinks for python and pip
+RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
+    ln -s /usr/bin/pip3.11 /usr/bin/pip
+
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -47,7 +54,6 @@ COPY . .
 
 # Set environment variables
 ENV PYTHONPATH=/app
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV DISPLAY=:99
 
 # Expose port
