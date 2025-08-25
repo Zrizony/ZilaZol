@@ -4,8 +4,13 @@ FROM ubuntu:22.04
 # Set working directory
 WORKDIR /app
 
+# Set timezone to avoid interactive prompt
+ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Install Python and system dependencies
-RUN apt-get update && apt-get install -y \
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    apt-get update && apt-get install -y \
     software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update \
