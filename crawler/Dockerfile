@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     fonts-liberation \
     fonts-unifont \
+    fonts-ubuntu \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -40,7 +41,6 @@ RUN pip install playwright
 # Install Playwright browsers with explicit path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 # Copy application code
 COPY . .
