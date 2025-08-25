@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     ca-certificates \
     fonts-liberation \
+    fonts-unifont \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -25,6 +26,9 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libxss1 \
     libxtst6 \
+    libgdk-pixbuf-xlib-2.0-0 \
+    libjpeg62-turbo \
+    libwebp7 \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
@@ -35,9 +39,8 @@ RUN pip install playwright
 
 # Install Playwright browsers with explicit path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install --with-deps
-RUN playwright install chromium --with-deps
-RUN playwright install-deps
+RUN playwright install chromium
+RUN playwright install-deps chromium
 
 # Copy application code
 COPY . .
