@@ -11,14 +11,14 @@ RUN apt-get update && apt-get install -y \
     && apt-get update \
     && apt-get install -y \
     python3.11 \
-    python3.11-pip \
     python3.11-venv \
+    python3-pip \
     wget \
     gnupg \
     ca-certificates \
     fonts-liberation \
     fonts-unifont \
-    ttf-ubuntu-font-family \
+    fonts-ubuntu \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y \
 
 # Create symlinks for python and pip
 RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
-    ln -s /usr/bin/pip3.11 /usr/bin/pip
+    ln -s /usr/bin/pip3 /usr/bin/pip
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
