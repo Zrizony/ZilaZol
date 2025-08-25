@@ -1,11 +1,19 @@
 steps:
-  # Build the container image
+  # Build the container image with better error handling
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/price-crawler', './crawler']
+    args: 
+      - 'build'
+      - '--no-cache'
+      - '--progress=plain'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/price-crawler'
+      - './crawler'
+    id: 'build'
   
   # Push the container image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/price-crawler']
+    waitFor: ['build']
   
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -27,10 +35,12 @@ steps:
       - '3600'
       - '--set-env-vars'
       - 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID'
+    waitFor: ['build']
 
 images:
   - 'gcr.io/$PROJECT_ID/price-crawler'
 
 options:
   machineType: 'E2_HIGHCPU_8'
-  logging: CLOUD_LOGGING_ONLY 
+  logging: CLOUD_LOGGING_ONLY
+  diskSizeGb: '20' 
