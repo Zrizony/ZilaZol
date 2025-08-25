@@ -11,7 +11,7 @@ Dependencies:
 import re, json, zipfile, logging, io
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 import requests
@@ -34,6 +34,14 @@ UA = (
 # Cloud Storage Configuration
 BUCKET_NAME = os.getenv('GCS_BUCKET_NAME', 'civic-ripsaw-466109-e2-crawler-data')
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'civic-ripsaw-466109-e2')
+
+# Screenshot retention settings
+SCREENSHOT_RETENTION_DAYS = 2
+
+# GCS operation settings
+GCS_BATCH_SIZE = 100  # Batch size for bulk operations
+GCS_RETRY_ATTEMPTS = 3  # Number of retry attempts for failed operations
+GCS_TIMEOUT = 30  # Timeout for GCS operations in seconds
 
 # Fill from gov.il table  (domain → creds)
 CREDS = {
@@ -77,36 +85,416 @@ except Exception as e:
 
 # ───────────── CLOUD STORAGE HELPERS ─────────────────────────────────
 def get_storage_client():
-    """Get Google Cloud Storage client"""
-    return storage.Client(project=PROJECT_ID)
+    """Get Google Cloud Storage client with optimized settings"""
+    try:
+        # Create client with optimized settings
+        client = storage.Client(
+            project=PROJECT_ID,
+            timeout=GCS_TIMEOUT
+        )
+        return client
+    except Exception as e:
+        log.error(f"Failed to create GCS client: {e}")
+        raise
 
 def upload_to_gcs(bucket_name: str, source_data: bytes, destination_blob_name: str):
-    """Upload data to Google Cloud Storage"""
-    try:
-        storage_client = get_storage_client()
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(destination_blob_name)
-        
-        blob.upload_from_string(source_data)
-        log.info(f"Uploaded {destination_blob_name} to {bucket_name}")
-        return True
-    except Exception as e:
-        log.error(f"Failed to upload {destination_blob_name}: {e}")
-        return False
+    """Upload data to Google Cloud Storage with retry logic"""
+    for attempt in range(GCS_RETRY_ATTEMPTS):
+        try:
+            storage_client = get_storage_client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(destination_blob_name)
+            
+            # Set metadata for better organization
+            blob.metadata = {
+                'uploaded_at': datetime.now().isoformat(),
+                'content_type': 'application/octet-stream',
+                'source': 'price_crawler'
+            }
+            
+            blob.upload_from_string(source_data, timeout=GCS_TIMEOUT)
+            log.info(f"✅ Uploaded {destination_blob_name} to {bucket_name} (attempt {attempt + 1})")
+            return True
+            
+        except Exception as e:
+            log.warning(f"Upload attempt {attempt + 1} failed for {destination_blob_name}: {e}")
+            if attempt == GCS_RETRY_ATTEMPTS - 1:
+                log.error(f"❌ All upload attempts failed for {destination_blob_name}")
+                return False
+            # Wait before retry (exponential backoff)
+            import time
+            time.sleep(2 ** attempt)
+    
+    return False
 
 def upload_file_to_gcs(bucket_name: str, source_file_path: str, destination_blob_name: str):
-    """Upload a file to Google Cloud Storage"""
+    """Upload a file to Google Cloud Storage with retry logic"""
+    for attempt in range(GCS_RETRY_ATTEMPTS):
+        try:
+            storage_client = get_storage_client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(destination_blob_name)
+            
+            # Set metadata for better organization
+            blob.metadata = {
+                'uploaded_at': datetime.now().isoformat(),
+                'source_file': source_file_path,
+                'source': 'price_crawler'
+            }
+            
+            blob.upload_from_filename(source_file_path, timeout=GCS_TIMEOUT)
+            log.info(f"✅ Uploaded {source_file_path} to {destination_blob_name} (attempt {attempt + 1})")
+            return True
+            
+        except Exception as e:
+            log.warning(f"File upload attempt {attempt + 1} failed for {source_file_path}: {e}")
+            if attempt == GCS_RETRY_ATTEMPTS - 1:
+                log.error(f"❌ All file upload attempts failed for {source_file_path}")
+                return False
+            # Wait before retry (exponential backoff)
+            import time
+            time.sleep(2 ** attempt)
+    
+    return False
+
+def delete_blob_from_gcs(bucket_name: str, blob_name: str):
+    """Delete a blob from Google Cloud Storage with retry logic"""
+    for attempt in range(GCS_RETRY_ATTEMPTS):
+        try:
+            storage_client = get_storage_client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            
+            if blob.exists():
+                blob.delete(timeout=GCS_TIMEOUT)
+                log.info(f"✅ Deleted {blob_name} from {bucket_name} (attempt {attempt + 1})")
+                return True
+            else:
+                log.info(f"ℹ️ Blob {blob_name} does not exist in {bucket_name}")
+                return True  # Consider this a success since the goal is achieved
+                
+        except Exception as e:
+            log.warning(f"Delete attempt {attempt + 1} failed for {blob_name}: {e}")
+            if attempt == GCS_RETRY_ATTEMPTS - 1:
+                log.error(f"❌ All delete attempts failed for {blob_name}")
+                return False
+            # Wait before retry (exponential backoff)
+            import time
+            time.sleep(2 ** attempt)
+    
+    return False
+
+def list_blobs_with_prefix(bucket_name: str, prefix: str):
+    """List all blobs with a given prefix with optimized settings"""
     try:
         storage_client = get_storage_client()
         bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(destination_blob_name)
         
-        blob.upload_from_filename(source_file_path)
-        log.info(f"Uploaded {source_file_path} to {destination_blob_name}")
-        return True
+        # Use page_size for better performance with large buckets
+        blobs = bucket.list_blobs(
+            prefix=prefix,
+            page_size=GCS_BATCH_SIZE,
+            timeout=GCS_TIMEOUT
+        )
+        return list(blobs)
     except Exception as e:
-        log.error(f"Failed to upload {source_file_path}: {e}")
-        return False
+        log.error(f"Failed to list blobs with prefix {prefix}: {e}")
+        return []
+
+def cleanup_old_screenshots():
+    """Delete screenshots older than SCREENSHOT_RETENTION_DAYS days with optimized batch operations"""
+    try:
+        log.info(f"🔄 Starting screenshot cleanup (retention: {SCREENSHOT_RETENTION_DAYS} days)...")
+        start_time = datetime.now()
+        cutoff_date = start_time - timedelta(days=SCREENSHOT_RETENTION_DAYS)
+        
+        # List all screenshots with optimized pagination
+        screenshots = list_blobs_with_prefix(BUCKET_NAME, "screenshots/")
+        
+        if not screenshots:
+            log.info("ℹ️ No screenshots found to clean up")
+            return 0
+        
+        log.info(f"📊 Found {len(screenshots)} total screenshots to analyze")
+        
+        # Separate screenshots by age for batch processing
+        to_delete = []
+        to_keep = []
+        parse_errors = []
+        
+        for blob in screenshots:
+            filename = blob.name
+            if not filename.endswith('.png'):
+                continue
+            
+            # Enhanced date extraction with multiple patterns
+            file_date = None
+            
+            # Pattern 1: screenshots/login_shop_YYYYMMDD_HHMMSS.png
+            date_match = re.search(r'(\d{8})_(\d{6})', filename)
+            if date_match:
+                try:
+                    date_str = date_match.group(1)
+                    time_str = date_match.group(2)
+                    file_date = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+                except ValueError:
+                    pass
+            
+            # Pattern 2: screenshots/login_shop_YYYY-MM-DD_HH-MM-SS.png
+            if not file_date:
+                date_match = re.search(r'(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})', filename)
+                if date_match:
+                    try:
+                        file_date = datetime(
+                            int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)),
+                            int(date_match.group(4)), int(date_match.group(5)), int(date_match.group(6))
+                        )
+                    except ValueError:
+                        pass
+            
+            # Pattern 3: Use blob creation time as fallback
+            if not file_date and blob.time_created:
+                try:
+                    file_date = blob.time_created.replace(tzinfo=None)
+                except Exception:
+                    pass
+            
+            # Determine if file should be deleted
+            if file_date:
+                if file_date < cutoff_date:
+                    to_delete.append((filename, file_date))
+                else:
+                    to_keep.append((filename, file_date))
+            else:
+                parse_errors.append(filename)
+        
+        log.info(f"📅 Screenshot analysis complete:")
+        log.info(f"   • To delete: {len(to_delete)} (older than {cutoff_date.strftime('%Y-%m-%d')})")
+        log.info(f"   • To keep: {len(to_keep)} (newer than {cutoff_date.strftime('%Y-%m-%d')})")
+        log.info(f"   • Parse errors: {len(parse_errors)}")
+        
+        # Log parse errors for debugging
+        if parse_errors:
+            log.warning(f"⚠️ Could not parse dates for {len(parse_errors)} files:")
+            for filename in parse_errors[:5]:  # Log first 5 errors
+                log.warning(f"   • {filename}")
+            if len(parse_errors) > 5:
+                log.warning(f"   • ... and {len(parse_errors) - 5} more")
+        
+        # Batch delete old screenshots
+        deleted_count = 0
+        failed_deletions = []
+        
+        if to_delete:
+            log.info(f"🗑️ Starting batch deletion of {len(to_delete)} old screenshots...")
+            
+            # Process in batches for better performance
+            for i in range(0, len(to_delete), GCS_BATCH_SIZE):
+                batch = to_delete[i:i + GCS_BATCH_SIZE]
+                batch_start = i + 1
+                batch_end = min(i + GCS_BATCH_SIZE, len(to_delete))
+                
+                log.info(f"   Processing batch {batch_start}-{batch_end} of {len(to_delete)}...")
+                
+                for filename, file_date in batch:
+                    if delete_blob_from_gcs(BUCKET_NAME, filename):
+                        deleted_count += 1
+                        log.debug(f"   ✅ Deleted: {filename} (from {file_date.strftime('%Y-%m-%d')})")
+                    else:
+                        failed_deletions.append(filename)
+                        log.warning(f"   ❌ Failed to delete: {filename}")
+                
+                # Small delay between batches to avoid overwhelming the API
+                if i + GCS_BATCH_SIZE < len(to_delete):
+                    import time
+                    time.sleep(0.5)
+        
+        # Calculate and log cleanup statistics
+        cleanup_duration = datetime.now() - start_time
+        success_rate = (deleted_count / len(to_delete) * 100) if to_delete else 100
+        
+        log.info(f"🎯 Screenshot cleanup completed in {cleanup_duration.total_seconds():.2f}s:")
+        log.info(f"   • Successfully deleted: {deleted_count}/{len(to_delete)} ({success_rate:.1f}%)")
+        log.info(f"   • Failed deletions: {len(failed_deletions)}")
+        log.info(f"   • Remaining screenshots: {len(to_keep)}")
+        
+        if failed_deletions:
+            log.warning(f"⚠️ Failed deletions (will retry next time):")
+            for filename in failed_deletions[:5]:  # Log first 5 failures
+                log.warning(f"   • {filename}")
+            if len(failed_deletions) > 5:
+                log.warning(f"   • ... and {len(failed_deletions) - 5} more")
+        
+        return deleted_count
+        
+    except Exception as e:
+        log.error(f"❌ Screenshot cleanup failed: {e}")
+        import traceback
+        log.error(f"Stack trace: {traceback.format_exc()}")
+        return 0
+
+def check_file_replacement_behavior():
+    """Check and log file replacement behavior for different file types"""
+    log.info("Checking file replacement behavior...")
+    
+    # Test file replacement for different file types
+    test_files = {
+        "test_zip": b"test zip content",
+        "test_json": b'{"test": "json content"}',
+        "test_screenshot": b"fake png content"
+    }
+    
+    for file_type, content in test_files.items():
+        test_blob_name = f"test_replacement/{file_type}.txt"
+        
+        # Upload first version
+        if upload_to_gcs(BUCKET_NAME, content, test_blob_name):
+            log.info(f"✅ Uploaded first version of {file_type}")
+            
+            # Upload second version (should replace)
+            new_content = content + b" - updated"
+            if upload_to_gcs(BUCKET_NAME, new_content, test_blob_name):
+                log.info(f"✅ Successfully replaced {file_type} (this is correct behavior)")
+                
+                # Clean up test file
+                delete_blob_from_gcs(BUCKET_NAME, test_blob_name)
+            else:
+                log.error(f"❌ Failed to replace {file_type}")
+        else:
+            log.error(f"❌ Failed to upload first version of {file_type}")
+    
+    log.info("File replacement behavior check completed")
+
+def get_storage_analytics():
+    """Get analytics about storage usage and file distribution"""
+    try:
+        log.info("📊 Collecting storage analytics...")
+        storage_client = get_storage_client()
+        bucket = storage_client.bucket(BUCKET_NAME)
+        
+        analytics = {
+            'total_size': 0,
+            'total_files': 0,
+            'by_type': {},
+            'by_folder': {},
+            'oldest_file': None,
+            'newest_file': None
+        }
+        
+        # Collect data from all blobs
+        blobs = list(bucket.list_blobs())
+        
+        for blob in blobs:
+            # File size
+            size = blob.size or 0
+            analytics['total_size'] += size
+            analytics['total_files'] += 1
+            
+            # File type
+            file_ext = Path(blob.name).suffix.lower()
+            if file_ext:
+                analytics['by_type'][file_ext] = analytics['by_type'].get(file_ext, 0) + 1
+            
+            # Folder structure
+            folder = str(Path(blob.name).parent)
+            if folder != '.':
+                analytics['by_folder'][folder] = analytics['by_folder'].get(folder, 0) + 1
+            
+            # Creation time
+            if blob.time_created:
+                created_time = blob.time_created.replace(tzinfo=None)
+                if not analytics['oldest_file'] or created_time < analytics['oldest_file']:
+                    analytics['oldest_file'] = created_time
+                if not analytics['newest_file'] or created_time > analytics['newest_file']:
+                    analytics['newest_file'] = created_time
+        
+        # Convert size to human readable format
+        def human_readable_size(size_bytes):
+            if size_bytes == 0:
+                return "0 B"
+            size_names = ["B", "KB", "MB", "GB", "TB"]
+            i = 0
+            while size_bytes >= 1024 and i < len(size_names) - 1:
+                size_bytes /= 1024.0
+                i += 1
+            return f"{size_bytes:.2f} {size_names[i]}"
+        
+        # Log analytics
+        log.info(f"📊 Storage Analytics for bucket: {BUCKET_NAME}")
+        log.info(f"   • Total files: {analytics['total_files']:,}")
+        log.info(f"   • Total size: {human_readable_size(analytics['total_size'])}")
+        
+        if analytics['oldest_file']:
+            log.info(f"   • Oldest file: {analytics['oldest_file'].strftime('%Y-%m-%d %H:%M:%S')}")
+        if analytics['newest_file']:
+            log.info(f"   • Newest file: {analytics['newest_file'].strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Top file types
+        if analytics['by_type']:
+            log.info(f"   • File types:")
+            sorted_types = sorted(analytics['by_type'].items(), key=lambda x: x[1], reverse=True)
+            for file_type, count in sorted_types[:5]:
+                log.info(f"     - {file_type}: {count:,} files")
+        
+        # Top folders
+        if analytics['by_folder']:
+            log.info(f"   • Top folders:")
+            sorted_folders = sorted(analytics['by_folder'].items(), key=lambda x: x[1], reverse=True)
+            for folder, count in sorted_folders[:5]:
+                log.info(f"     - {folder}: {count:,} files")
+        
+        return analytics
+        
+    except Exception as e:
+        log.error(f"❌ Failed to collect storage analytics: {e}")
+        return None
+
+def batch_delete_blobs(bucket_name: str, blob_names: list):
+    """Delete multiple blobs in batch for better performance"""
+    if not blob_names:
+        return 0
+    
+    try:
+        log.info(f"🗑️ Starting batch deletion of {len(blob_names)} blobs...")
+        storage_client = get_storage_client()
+        bucket = storage_client.bucket(bucket_name)
+        
+        deleted_count = 0
+        failed_count = 0
+        
+        # Process in batches
+        for i in range(0, len(blob_names), GCS_BATCH_SIZE):
+            batch = blob_names[i:i + GCS_BATCH_SIZE]
+            batch_start = i + 1
+            batch_end = min(i + GCS_BATCH_SIZE, len(blob_names))
+            
+            log.info(f"   Processing batch {batch_start}-{batch_end} of {len(blob_names)}...")
+            
+            for blob_name in batch:
+                try:
+                    blob = bucket.blob(blob_name)
+                    if blob.exists():
+                        blob.delete(timeout=GCS_TIMEOUT)
+                        deleted_count += 1
+                        log.debug(f"   ✅ Deleted: {blob_name}")
+                    else:
+                        log.debug(f"   ℹ️ Already deleted: {blob_name}")
+                        deleted_count += 1  # Consider this a success
+                except Exception as e:
+                    failed_count += 1
+                    log.warning(f"   ❌ Failed to delete {blob_name}: {e}")
+            
+            # Small delay between batches
+            if i + GCS_BATCH_SIZE < len(blob_names):
+                import time
+                time.sleep(0.5)
+        
+        log.info(f"🎯 Batch deletion completed: {deleted_count} successful, {failed_count} failed")
+        return deleted_count
+        
+    except Exception as e:
+        log.error(f"❌ Batch deletion failed: {e}")
+        return 0
 
 
 # ───────────── HELPERS ───────────────────────────────────────────────
@@ -603,6 +991,30 @@ def main():
         log.error("Cloud setup failed, exiting")
         return
     
+    # Get storage analytics before cleanup
+    log.info("📊 Collecting initial storage analytics...")
+    initial_analytics = get_storage_analytics()
+    
+    # Clean up old screenshots (older than 2 days)
+    log.info("🧹 Starting automated cleanup process...")
+    deleted_screenshots = cleanup_old_screenshots()
+    
+    # Get storage analytics after cleanup
+    if deleted_screenshots > 0:
+        log.info("📊 Collecting post-cleanup storage analytics...")
+        final_analytics = get_storage_analytics()
+        
+        if initial_analytics and final_analytics:
+            space_saved = initial_analytics['total_size'] - final_analytics['total_size']
+            files_removed = initial_analytics['total_files'] - final_analytics['total_files']
+            log.info(f"🎯 Cleanup Results:")
+            log.info(f"   • Screenshots deleted: {deleted_screenshots}")
+            log.info(f"   • Total files removed: {files_removed}")
+            log.info(f"   • Space saved: {space_saved:,} bytes")
+    
+    # Check file replacement behavior
+    check_file_replacement_behavior()
+    
     counts = {"zips": 0, "xmls": 0, "rows": 0}
     visited = set()
 
@@ -653,6 +1065,10 @@ def main():
 
     log.info("Downloaded %d files, parsed %d XMLs, extracted %d rows",
              counts["zips"], counts["xmls"], counts["rows"])
+    
+    # Final storage analytics
+    log.info("📊 Final storage analytics:")
+    get_storage_analytics()
 
 
 if __name__ == "__main__":

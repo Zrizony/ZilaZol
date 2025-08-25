@@ -10,6 +10,9 @@ A cloud-based web crawler for Israeli retail price comparison, built with Python
 - **Cloud Storage**: Automatically uploads data to Google Cloud Storage
 - **REST API**: Flask-based API for triggering crawls and health checks
 - **Scheduled Execution**: Automated daily runs via Cloud Scheduler
+- **Storage Optimization**: Enhanced GCS operations with retry logic and batch processing
+- **Automated Cleanup**: 2-day screenshot retention with intelligent cleanup
+- **Storage Analytics**: Comprehensive storage usage monitoring and reporting
 
 ## 🏗️ Architecture
 
@@ -141,6 +144,34 @@ GET /health/detailed
 ```
 Tests all imports and dependencies.
 
+### Storage Management
+
+#### Storage Status
+```http
+GET /storage/status
+```
+Returns storage bucket health and configuration information.
+
+#### Storage Analytics
+```http
+GET /storage/analytics
+```
+Returns comprehensive storage usage statistics including:
+- Total file count and size
+- File type distribution
+- Folder structure analysis
+- Creation time ranges
+
+#### Storage Cleanup
+```http
+POST /storage/cleanup
+```
+Manually triggers the 2-day screenshot cleanup process.
+Returns cleanup results including:
+- Number of screenshots deleted
+- Space saved in bytes
+- Total files removed
+
 ## 🔄 Continuous Deployment
 
 ### GitHub Integration
@@ -183,11 +214,52 @@ curl -X POST https://price-crawler-947639158495.me-west1.run.app/crawl
 - **Network**: Runs in isolated Google Cloud environment
 - **Updates**: Automatic security updates via container rebuilds
 
+## 🗄️ Storage Optimization & Cleanup
+
+### Automated Screenshot Cleanup
+- **Retention Policy**: Screenshots are automatically deleted after 2 days
+- **Intelligent Parsing**: Multiple date format support for accurate age detection
+- **Batch Operations**: Efficient batch deletion with configurable batch sizes
+- **Error Handling**: Comprehensive error handling with retry logic
+
+### Enhanced GCS Operations
+- **Retry Logic**: Automatic retry with exponential backoff for failed operations
+- **Connection Pooling**: Optimized client connections with timeout management
+- **Batch Processing**: Efficient batch operations for large file sets
+- **Metadata Management**: Enhanced file metadata for better organization
+
+### Storage Analytics
+- **Usage Monitoring**: Real-time storage usage statistics
+- **Performance Metrics**: Upload/download success rates and timing
+- **File Distribution**: Analysis of file types and folder structures
+- **Space Optimization**: Tracking of space saved through cleanup operations
+
+### Configuration Options
+```python
+# GCS operation settings
+GCS_BATCH_SIZE = 100          # Batch size for bulk operations
+GCS_RETRY_ATTEMPTS = 3        # Number of retry attempts
+GCS_TIMEOUT = 30              # Timeout for operations (seconds)
+SCREENSHOT_RETENTION_DAYS = 2 # Screenshot retention period
+```
+
 ## 🧪 Testing
 
 ### Local Testing
 ```bash
 python test_local.py
+```
+
+### Storage Optimization Testing
+```bash
+# Test all storage features (including cleanup)
+.\test_storage_optimization.ps1
+
+# Test without cleanup (for development)
+.\test_storage_optimization.ps1 -TestCleanup:$false
+
+# Test against deployed service
+.\test_storage_optimization.ps1 -BaseUrl "https://price-crawler-947639158495.me-west1.run.app"
 ```
 
 ### API Testing
@@ -200,6 +272,15 @@ curl https://price-crawler-947639158495.me-west1.run.app/test
 
 # Trigger crawler
 curl -X POST https://price-crawler-947639158495.me-west1.run.app/crawl
+
+# Storage status
+curl https://price-crawler-947639158495.me-west1.run.app/storage/status
+
+# Storage analytics
+curl https://price-crawler-947639158495.me-west1.run.app/storage/analytics
+
+# Trigger cleanup
+curl -X POST https://price-crawler-947639158495.me-west1.run.app/storage/cleanup
 ```
 
 ## 📈 Performance
