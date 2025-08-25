@@ -6,6 +6,10 @@ WORKDIR /app
 
 # Install Python and system dependencies
 RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y \
     python3.11 \
     python3.11-pip \
     python3.11-venv \
@@ -32,7 +36,7 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     libgdk-pixbuf2.0-0 \
     libjpeg-turbo8 \
-    libwebp6 \
+    libwebp7 \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
