@@ -25,35 +25,19 @@ try {
     exit 1
 }
 
-# Test build with the main Dockerfile
-Write-Host "🔨 Testing main Dockerfile..." -ForegroundColor Cyan
+# Test build with the Dockerfile
+Write-Host "🔨 Testing Dockerfile..." -ForegroundColor Cyan
 try {
     docker build --no-cache --progress=plain -t price-crawler-test ./crawler
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ Main Dockerfile build successful!" -ForegroundColor Green
+        Write-Host "✅ Dockerfile build successful!" -ForegroundColor Green
     } else {
-        Write-Host "❌ Main Dockerfile build failed" -ForegroundColor Red
+        Write-Host "❌ Dockerfile build failed" -ForegroundColor Red
         exit 1
     }
 } catch {
-    Write-Host "❌ Main Dockerfile build failed with error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "❌ Dockerfile build failed with error: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
-}
-
-# Test build with alternative Dockerfile (if it exists)
-if (Test-Path "./crawler/Dockerfile.alternative") {
-    Write-Host ""
-    Write-Host "🔨 Testing alternative Dockerfile..." -ForegroundColor Cyan
-    try {
-        docker build --no-cache --progress=plain -f ./crawler/Dockerfile.alternative -t price-crawler-test-alt ./crawler
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "✅ Alternative Dockerfile build successful!" -ForegroundColor Green
-        } else {
-            Write-Host "❌ Alternative Dockerfile build failed" -ForegroundColor Red
-        }
-    } catch {
-        Write-Host "❌ Alternative Dockerfile build failed with error: $($_.Exception.Message)" -ForegroundColor Red
-    }
 }
 
 # Test running the container
@@ -94,8 +78,7 @@ try {
 Write-Host ""
 Write-Host "🧹 Cleaning up test images..." -ForegroundColor Cyan
 docker rmi price-crawler-test -f 2>$null
-docker rmi price-crawler-test-alt -f 2>$null
 
 Write-Host ""
 Write-Host "🎯 Docker build test completed!" -ForegroundColor Green
-Write-Host "If all tests passed, you can safely push to Cloud Build." -ForegroundColor Yellow
+Write-Host "✅ If the build succeeded, you can safely push to Cloud Build." -ForegroundColor Yellow
