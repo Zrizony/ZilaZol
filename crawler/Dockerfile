@@ -63,8 +63,9 @@ RUN echo "=== Checking if Flask was installed ==="
 RUN pip list | grep -i flask || echo "Flask not found in pip list"
 RUN python -c "import flask; print('Flask version:', flask.__version__)" || echo "Flask import failed"
 
-# Copy application code
+# Copy application code and test Flask installation
 COPY . .
+RUN python test_flask_install.py
 
 # Install Playwright browsers with explicit path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
