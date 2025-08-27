@@ -46,8 +46,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone &
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python and pip
-RUN rm -f /usr/bin/python /usr/bin/pip && \
-    ln -s /usr/bin/python3.11 /usr/bin/python && \
+RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
     ln -s /usr/bin/pip3 /usr/bin/pip
 
 # Copy requirements and install Python dependencies
