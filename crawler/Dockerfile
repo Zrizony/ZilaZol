@@ -52,8 +52,11 @@ RUN rm -f /usr/bin/python /usr/bin/pip && \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
+RUN ls -la /app/
+RUN cat /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install playwright
+RUN pip list | grep flask
 
 # Install Playwright browsers with explicit path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
