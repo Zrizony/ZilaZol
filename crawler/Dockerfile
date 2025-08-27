@@ -16,15 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python dependencies
-COPY crawler/requirements.txt .
+COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
+# Install Playwright browsers
+RUN playwright install chromium
+
 # Copy the entire app code
-COPY crawler/ .
+COPY . .
+
+# Install Playwright browsers
+RUN playwright install chromium
 
 # Create a non-root user for Cloud Run security
 RUN useradd -m appuser
 USER appuser
 
-# Run the Flask app with Gunicorn
-CMD exec gunicorn wsgi:app --bind 0.0.0.0:${PORT:-8080} --workers=2 --threads=8 --timeout=120
+# Run the Flask app
+CMD ["python", "app.py"]
