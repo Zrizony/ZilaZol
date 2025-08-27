@@ -54,16 +54,22 @@ RUN rm -f /usr/bin/python /usr/bin/pip && \
 COPY requirements.txt .
 RUN ls -la /app/
 RUN cat /app/requirements.txt
+RUN pip --version
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install playwright
-RUN pip list | grep flask
+RUN echo "=== Checking installed packages ==="
+RUN pip list
+RUN echo "=== Checking if Flask was installed ==="
+RUN pip list | grep -i flask || echo "Flask not found in pip list"
+RUN python -c "import flask; print('Flask version:', flask.__version__)" || echo "Flask import failed"
+
+# Copy application code and test Flask installation
+COPY . .
+RUN python test_flask_install.py
 
 # Install Playwright browsers with explicit path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
-
-# Copy application code
-COPY . .
 
 # Set environment variables
 ENV PYTHONPATH=/app
