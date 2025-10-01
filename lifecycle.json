@@ -3,8 +3,14 @@
     {
       "action": {"type": "Delete"},
       "condition": {
-        "age": 7,
-        "isLive": true
+        "age": 2,
+        "matchesPrefix": ["screenshots/"]
+      }
+    },
+    {
+      "action": {"type": "Delete"},
+      "condition": {
+        "age": 7
       }
     }
   ]

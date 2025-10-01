@@ -35,8 +35,9 @@ UA = (
 BUCKET_NAME = os.getenv('GCS_BUCKET_NAME', 'civic-ripsaw-466109-e2-crawler-data')
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'civic-ripsaw-466109-e2')
 
-# Screenshot retention settings
-SCREENSHOT_RETENTION_DAYS = 2
+# File retention settings
+GENERAL_RETENTION_DAYS = 7  # General file retention period
+SCREENSHOT_RETENTION_DAYS = 2  # Screenshot retention period (exception)
 
 # GCS operation settings
 GCS_BATCH_SIZE = 100  # Batch size for bulk operations
