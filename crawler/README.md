@@ -132,11 +132,26 @@ GET /test
 ```
 Simple test endpoint for connectivity.
 
+### Ping (Keepalive)
+```http
+GET|POST /ping
+```
+Lightweight keepalive endpoint for service warmup. Use this with Cloud Scheduler to prevent cold starts.
+- Response time: < 50ms
+- No heavy operations
+- Returns: `{"status": "ok", "message": "Service is alive and ready"}`
+
+**Use case**: Configure Cloud Scheduler to hit this endpoint every 5-10 minutes to keep the service warm.
+
 ### Trigger Crawler
 ```http
 POST /crawl
 ```
-Triggers the price crawling process.
+Triggers the complete price crawling process (5-30 minutes).
+- Scrapes all retailer websites
+- Downloads and processes ZIP files
+- Uploads data to Cloud Storage
+- Performs cleanup operations
 
 ### Detailed Health Check
 ```http
@@ -193,7 +208,32 @@ Returns cleanup results including:
 ```bash
 # Trigger crawler manually
 curl -X POST https://price-crawler-947639158495.me-west1.run.app/crawl
+
+# Ping service (warmup)
+curl https://price-crawler-947639158495.me-west1.run.app/ping
 ```
+
+## ⏰ Cloud Scheduler Setup
+
+Configure automated scheduling for the crawler:
+
+### Option 1: Daily Crawler Only
+```bash
+.\setup_scheduler.ps1
+```
+Sets up daily crawler at 7 AM (Jerusalem time).
+
+### Option 2: Warmup + Crawler (Recommended)
+```bash
+# Setup warmup (every 5 minutes to prevent cold starts)
+.\setup_scheduler_warmup.ps1
+
+# Setup daily crawler
+.\setup_scheduler.ps1
+```
+Keeps service warm and runs daily crawler.
+
+**📚 See [SCHEDULER_SETUP.md](SCHEDULER_SETUP.md) for detailed configuration options.**
 
 ## 📊 Monitoring
 

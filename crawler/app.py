@@ -29,14 +29,29 @@ def health_check():
         ],
         "endpoints": {
             "health": "/",
+            "ping": "/ping (lightweight keepalive)",
             "test": "/test",
-            "crawl": "/crawl",
+            "crawl": "/crawl (POST - runs full crawler)",
             "detailed_health": "/health/detailed",
-            "storage_cleanup": "/storage/cleanup",
+            "storage_cleanup": "/storage/cleanup (POST)",
             "storage_analytics": "/storage/analytics",
             "storage_status": "/storage/status"
         }
     })
+
+@app.route('/ping', methods=['GET', 'POST'])
+def ping():
+    """Lightweight keepalive endpoint for Cloud Scheduler warmup
+    
+    Use this endpoint to keep the service warm without triggering the crawler.
+    Cloud Scheduler can hit this periodically to prevent cold starts.
+    """
+    return jsonify({
+        "status": "ok",
+        "service": "price-crawler-cloud",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Service is alive and ready"
+    }), 200
 
 @app.route('/crawl', methods=['POST'])
 def run_crawler():
