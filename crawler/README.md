@@ -6,7 +6,7 @@ A cloud-based web crawler for Israeli retail price comparison, built with Python
 
 - **Automated Price Crawling**: Scrapes prices from Israeli retailer portals
 - **Cloud-Native**: Built for Google Cloud Run with automatic scaling
-- **Data Processing**: Extracts and processes XML/JSON price data
+- **Data Processing**: Extracts and processes XML/JSON price data from .zip and .gz files
 - **Cloud Storage**: Automatically uploads data to Google Cloud Storage
 - **REST API**: Flask-based API for triggering crawls and health checks
 - **Scheduled Execution**: Automated daily runs via Cloud Scheduler
