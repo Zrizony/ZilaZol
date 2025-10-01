@@ -88,11 +88,8 @@ except Exception as e:
 def get_storage_client():
     """Get Google Cloud Storage client with optimized settings"""
     try:
-        # Create client with optimized settings
-        client = storage.Client(
-            project=PROJECT_ID,
-            timeout=GCS_TIMEOUT
-        )
+        # Create client with project ID only (timeout is applied per-operation)
+        client = storage.Client(project=PROJECT_ID)
         return client
     except Exception as e:
         log.error(f"Failed to create GCS client: {e}")
