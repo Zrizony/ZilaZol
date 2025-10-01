@@ -55,18 +55,33 @@ def ping():
 
 @app.route('/crawl', methods=['POST'])
 def run_crawler():
-    """Run the cloud crawler and return results"""
+    """Run the cloud crawler. Optional: target a single shop via query/body.
+
+    Examples:
+    - POST /crawl                 -> crawl all shops
+    - POST /crawl?shop=rami_levi  -> crawl one shop
+    - POST /crawl  {"shop":"rami_levi"} -> crawl one shop
+    """
     try:
         # Import and run the cloud crawler only when called
         from crawler_cloud import main as crawler_main
+        # Read 'shop' from query or JSON body
+        target_shop = request.args.get('shop')
+        if not target_shop:
+            try:
+                payload = request.get_json(silent=True) or {}
+                target_shop = payload.get('shop')
+            except Exception:
+                target_shop = None
         
-        # Run the cloud crawler
-        crawler_main()
+        # Run the cloud crawler (all or single shop)
+        crawler_main(target_shop)
         
         return jsonify({
             "status": "success",
             "message": "Cloud crawler completed successfully",
             "timestamp": datetime.now().isoformat(),
+            "shop": target_shop or "all",
             "features_used": [
                 "Google Cloud Storage uploads",
                 "Cloud logging",
@@ -97,6 +112,41 @@ def test_endpoint():
         "message": "Test endpoint working",
         "timestamp": datetime.now().isoformat()
     })
+
+@app.route('/run', methods=['POST'])
+def fanout_run():
+    """Fan-out runner: triggers per-shop crawls and returns immediately (202).
+
+    This endpoint discovers retailers and sends internal HTTP requests to /crawl?shop=...
+    It does not wait for completion to keep Scheduler within a short deadline.
+    """
+    try:
+        from crawler_cloud import retailer_links, slug
+        import requests as http
+        base_url = os.environ.get('BASE_URL') or request.host_url.rstrip('/')
+
+        links = retailer_links()
+        triggered = []
+        for shop in links.keys():
+            shop_slug = slug(shop)
+            try:
+                http.post(f"{base_url}/crawl", json={"shop": shop_slug}, timeout=5)
+                triggered.append(shop_slug)
+            except Exception:
+                pass
+
+        return jsonify({
+            "status": "accepted",
+            "message": "Fan-out started",
+            "triggered": triggered,
+            "timestamp": datetime.now().isoformat()
+        }), 202
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Fan-out error: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 @app.route('/health/detailed', methods=['GET'])
 def detailed_health():

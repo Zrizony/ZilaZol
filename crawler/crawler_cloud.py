@@ -963,7 +963,93 @@ def test_cloud_setup():
     log.info("✅ All cloud setup tests passed")
     return True
 
-def main():
+def _crawl_single_shop(shop: str, hub: str, counts: dict):
+    """Crawl a single retailer hub and update counts."""
+    log.info(f"[{shop}] hub scan")
+    creds = creds_for(shop)
+    shop_str = str(shop) if shop else "retailer"
+    sess = get_authenticated_session(hub, creds)
+    files = zip_links(hub, creds, shop_str)
+    if not files:
+        log.warning("No files for %s", shop)
+        return
+
+    for url in files:
+        try:
+            resp = sess.get(url, headers={"User-Agent": UA}, timeout=120, verify=False)
+            resp.raise_for_status()
+            fname = Path(urlparse(url).path).name
+            
+            # Upload compressed file to cloud storage
+            file_blob_name = f"downloads/{slug(shop_str)}/{fname}"
+            if upload_to_gcs(BUCKET_NAME, resp.content, file_blob_name):
+                counts["zips"] += 1
+
+            # Process file content based on magic bytes (robust against wrong extensions)
+            magic2 = resp.content[:2]
+            lower_name = fname.lower()
+
+            if magic2 == b'\x1f\x8b':  # gzip magic
+                # Handle .gz files (single file compression)
+                log.info(f"Processing .gz file: {fname}")
+                try:
+                    with gzip.GzipFile(fileobj=io.BytesIO(resp.content)) as gz_file:
+                        xml_data = gz_file.read()
+                        xml_type, rows = parse_xml(xml_data, shop_str)
+                        if xml_type:
+                            counts["xmls"] += 1
+                            counts["rows"] += len(rows)
+                            
+                            # Upload JSON data to cloud storage
+                            base_fname = fname[:-3] if fname.endswith('.gz') else fname
+                            json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{base_fname}.jsonl"
+                            json_data = json.dumps(rows, ensure_ascii=False)
+                            upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
+                        else:
+                            log.warning("Unknown XML type for %s", fname)
+                except Exception as gz_err:
+                    log.error(f"Error processing .gz file {fname}: {gz_err}")
+                    
+            elif magic2 == b'PK':  # zip magic
+                # Handle .zip files (archive with multiple files)
+                log.info(f"Processing .zip file: {fname}")
+                with zipfile.ZipFile(io.BytesIO(resp.content), "r") as zip_ref:
+                    for zip_info in zip_ref.infolist():
+                        if zip_info.filename.endswith((".xml", ".json")):
+                            with zip_ref.open(zip_info) as file:
+                                xml_data = file.read()
+                                xml_type, rows = parse_xml(xml_data, shop_str)
+                                if xml_type:
+                                    counts["xmls"] += 1
+                                    counts["rows"] += len(rows)
+                                    
+                                    # Upload JSON data to cloud storage
+                                    json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{zip_info.filename}.jsonl"
+                                    json_data = json.dumps(rows, ensure_ascii=False)
+                                    upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
+                                else:
+                                    log.warning("Unknown XML type for %s", zip_info.filename)
+            else:
+                # Try plain XML fallback
+                if lower_name.endswith('.xml') or resp.content.strip().startswith(b'<'):
+                    log.info(f"Processing plain XML file: {fname}")
+                    xml_type, rows = parse_xml(resp.content, shop_str)
+                    if xml_type:
+                        counts["xmls"] += 1
+                        counts["rows"] += len(rows)
+                        json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{fname}.jsonl"
+                        json_data = json.dumps(rows, ensure_ascii=False)
+                        upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
+                    else:
+                        log.warning("Unknown XML type for %s", fname)
+                else:
+                    log.warning(f"Unsupported file type or unknown magic for: {fname} (magic={magic2!r})")
+                
+        except Exception as e:
+            log.error("Error processing %s: %s", url, e)
+
+
+def main(target_shop: str | None = None):
     # Check Playwright browser installation
     try:
         from playwright.sync_api import sync_playwright
@@ -1012,78 +1098,24 @@ def main():
     counts = {"zips": 0, "xmls": 0, "rows": 0}
     visited = set()
 
-    for shop, hub in retailer_links().items():
-        if hub in visited:
-            continue
-        visited.add(hub)
+    links = retailer_links()
 
-        log.info(f"[{shop}] hub scan")
-        creds = creds_for(shop)
-        shop_str = str(shop) if shop else "retailer"
-        sess = get_authenticated_session(hub, creds)
-        files = zip_links(hub, creds, shop_str)
-        if not files:
-            log.warning("No files for %s", shop)
-            continue
-
-        for url in files:
-            try:
-                resp = sess.get(url, headers={"User-Agent": UA}, timeout=120, verify=False)
-                resp.raise_for_status()
-                fname = Path(urlparse(url).path).name
-                
-                # Upload compressed file to cloud storage
-                file_blob_name = f"downloads/{slug(shop_str)}/{fname}"
-                if upload_to_gcs(BUCKET_NAME, resp.content, file_blob_name):
-                    counts["zips"] += 1
-
-                # Process file content based on type
-                if fname.lower().endswith('.gz'):
-                    # Handle .gz files (single file compression)
-                    log.info(f"Processing .gz file: {fname}")
-                    try:
-                        with gzip.GzipFile(fileobj=io.BytesIO(resp.content)) as gz_file:
-                            xml_data = gz_file.read()
-                            xml_type, rows = parse_xml(xml_data, shop_str)
-                            if xml_type:
-                                counts["xmls"] += 1
-                                counts["rows"] += len(rows)
-                                
-                                # Upload JSON data to cloud storage
-                                # Remove .gz extension for output filename
-                                base_fname = fname[:-3] if fname.endswith('.gz') else fname
-                                json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{base_fname}.jsonl"
-                                json_data = json.dumps(rows, ensure_ascii=False)
-                                upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
-                            else:
-                                log.warning("Unknown XML type for %s", fname)
-                    except Exception as gz_err:
-                        log.error(f"Error processing .gz file {fname}: {gz_err}")
-                        
-                elif fname.lower().endswith('.zip'):
-                    # Handle .zip files (archive with multiple files)
-                    log.info(f"Processing .zip file: {fname}")
-                    with zipfile.ZipFile(io.BytesIO(resp.content), "r") as zip_ref:
-                        for zip_info in zip_ref.infolist():
-                            if zip_info.filename.endswith((".xml", ".json")):
-                                with zip_ref.open(zip_info) as file:
-                                    xml_data = file.read()
-                                    xml_type, rows = parse_xml(xml_data, shop_str)
-                                    if xml_type:
-                                        counts["xmls"] += 1
-                                        counts["rows"] += len(rows)
-                                        
-                                        # Upload JSON data to cloud storage
-                                        json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{zip_info.filename}.jsonl"
-                                        json_data = json.dumps(rows, ensure_ascii=False)
-                                        upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
-                                    else:
-                                        log.warning("Unknown XML type for %s", zip_info.filename)
-                else:
-                    log.warning(f"Unsupported file type: {fname}")
-                    
-            except Exception as e:
-                log.error("Error processing %s: %s", url, e)
+    # If a specific shop is requested, try to match by exact name or slug
+    if target_shop:
+        # Accept slug or name (case-insensitive)
+        norm_target = slug(target_shop).lower()
+        for shop, hub in links.items():
+            if slug(shop).lower() == norm_target or shop.lower() == target_shop.lower():
+                _crawl_single_shop(shop, hub, counts)
+                break
+        else:
+            log.warning(f"Requested shop not found: {target_shop}")
+    else:
+        for shop, hub in links.items():
+            if hub in visited:
+                continue
+            visited.add(hub)
+            _crawl_single_shop(shop, hub, counts)
 
     log.info("Downloaded %d files, parsed %d XMLs, extracted %d rows",
              counts["zips"], counts["xmls"], counts["rows"])

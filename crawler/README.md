@@ -153,6 +153,23 @@ Triggers the complete price crawling process (5-30 minutes).
 - Uploads data to Cloud Storage
 - Performs cleanup operations
 
+#### Per-shop crawl
+You can target a single retailer to keep runtime short:
+
+```http
+POST /crawl?shop=<slug>
+POST /crawl
+{ "shop": "<slug>" }
+```
+
+Example: `POST /crawl?shop=RamiLevi` or `POST /crawl?shop=rami_levi` (slug/name both accepted).
+
+### Fan-out Runner
+```http
+POST /run
+```
+Starts one request per retailer and returns 202 immediately (does not wait for completion). Use this when you want a single Scheduler job and per-shop crawling behind the scenes.
+
 ### Detailed Health Check
 ```http
 GET /health/detailed
