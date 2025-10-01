@@ -110,7 +110,7 @@ def upload_to_gcs(bucket_name: str, source_data: bytes, destination_blob_name: s
                 'source': 'price_crawler'
             }
             
-            blob.upload_from_string(source_data, timeout=GCS_TIMEOUT)
+            blob.upload_from_string(source_data)
             log.info(f"✅ Uploaded {destination_blob_name} to {bucket_name} (attempt {attempt + 1})")
             return True
             
@@ -140,7 +140,7 @@ def upload_file_to_gcs(bucket_name: str, source_file_path: str, destination_blob
                 'source': 'price_crawler'
             }
             
-            blob.upload_from_filename(source_file_path, timeout=GCS_TIMEOUT)
+            blob.upload_from_filename(source_file_path)
             log.info(f"✅ Uploaded {source_file_path} to {destination_blob_name} (attempt {attempt + 1})")
             return True
             
@@ -164,7 +164,7 @@ def delete_blob_from_gcs(bucket_name: str, blob_name: str):
             blob = bucket.blob(blob_name)
             
             if blob.exists():
-                blob.delete(timeout=GCS_TIMEOUT)
+                blob.delete()
                 log.info(f"✅ Deleted {blob_name} from {bucket_name} (attempt {attempt + 1})")
                 return True
             else:
@@ -188,12 +188,8 @@ def list_blobs_with_prefix(bucket_name: str, prefix: str):
         storage_client = get_storage_client()
         bucket = storage_client.bucket(bucket_name)
         
-        # Use page_size for better performance with large buckets
-        blobs = bucket.list_blobs(
-            prefix=prefix,
-            page_size=GCS_BATCH_SIZE,
-            timeout=GCS_TIMEOUT
-        )
+        # List blobs with prefix (timeout applied per operation)
+        blobs = bucket.list_blobs(prefix=prefix)
         return list(blobs)
     except Exception as e:
         log.error(f"Failed to list blobs with prefix {prefix}: {e}")
@@ -472,7 +468,7 @@ def batch_delete_blobs(bucket_name: str, blob_names: list):
                 try:
                     blob = bucket.blob(blob_name)
                     if blob.exists():
-                        blob.delete(timeout=GCS_TIMEOUT)
+                        blob.delete()
                         deleted_count += 1
                         log.debug(f"   ✅ Deleted: {blob_name}")
                     else:
