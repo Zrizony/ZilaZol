@@ -781,7 +781,8 @@ def playwright_with_login(hub: str, creds: dict | None, shop: str = "retailer"):
 
 
 # ─────────────── ZIP/GZ DISCOVERY ────────────────────────────────────
-def zip_links(hub: str, creds: dict | None, shop: str = "retailer") -> list[str]:
+def zip_links(hub: str, creds: dict | None, shop: str = "retailer") -> tuple[list[str], object]:
+    """Get download URLs and return authenticated session for downloads."""
     captured = set()
     pw, browser, page = playwright_with_login(hub, creds, shop)
     
@@ -854,13 +855,10 @@ def zip_links(hub: str, creds: dict | None, shop: str = "retailer") -> list[str]
         if href and ZIP_RX.search(href):
             captured.add(urljoin(hub, href))
     
-    browser.close()
-    pw.stop()
-    
-    # Return unique URLs that match our file patterns
+    # Return unique URLs and the authenticated page for downloads
     unique_urls = list(dict.fromkeys(u for u in captured if ZIP_RX.search(u)))
     log.info(f"Found {len(unique_urls)} download URLs for {shop}")
-    return unique_urls
+    return unique_urls, page
 
 
 # ───────────── XML NORMALISERS ───────────────────────────────────────
@@ -968,32 +966,36 @@ def _crawl_single_shop(shop: str, hub: str, counts: dict):
     log.info(f"[{shop}] hub scan")
     creds = creds_for(shop)
     shop_str = str(shop) if shop else "retailer"
-    sess = get_authenticated_session(hub, creds)
-    files = zip_links(hub, creds, shop_str)
+    # Use only Playwright-based authentication to avoid session conflicts
+    files, page = zip_links(hub, creds, shop_str)
     if not files:
         log.warning("No files for %s", shop)
+        page.close()
         return
 
     for url in files:
         try:
-            resp = sess.get(url, headers={"User-Agent": UA}, timeout=120, verify=False)
-            resp.raise_for_status()
+            # Use the authenticated page to download files
+            resp = page.request.get(url, timeout=120_000)
+            if resp.status != 200:
+                log.warning(f"Download failed for {url}: {resp.status}")
+                continue
             fname = Path(urlparse(url).path).name
             
             # Upload compressed file to cloud storage
             file_blob_name = f"downloads/{slug(shop_str)}/{fname}"
-            if upload_to_gcs(BUCKET_NAME, resp.content, file_blob_name):
+            if upload_to_gcs(BUCKET_NAME, resp.body(), file_blob_name):
                 counts["zips"] += 1
 
             # Process file content based on magic bytes (robust against wrong extensions)
-            magic2 = resp.content[:2]
+            magic2 = resp.body()[:2]
             lower_name = fname.lower()
 
             if magic2 == b'\x1f\x8b':  # gzip magic
                 # Handle .gz files (single file compression)
                 log.info(f"Processing .gz file: {fname}")
                 try:
-                    with gzip.GzipFile(fileobj=io.BytesIO(resp.content)) as gz_file:
+                    with gzip.GzipFile(fileobj=io.BytesIO(resp.body())) as gz_file:
                         xml_data = gz_file.read()
                         xml_type, rows = parse_xml(xml_data, shop_str)
                         if xml_type:
@@ -1013,7 +1015,7 @@ def _crawl_single_shop(shop: str, hub: str, counts: dict):
             elif magic2 == b'PK':  # zip magic
                 # Handle .zip files (archive with multiple files)
                 log.info(f"Processing .zip file: {fname}")
-                with zipfile.ZipFile(io.BytesIO(resp.content), "r") as zip_ref:
+                with zipfile.ZipFile(io.BytesIO(resp.body()), "r") as zip_ref:
                     for zip_info in zip_ref.infolist():
                         if zip_info.filename.endswith((".xml", ".json")):
                             with zip_ref.open(zip_info) as file:
@@ -1031,9 +1033,9 @@ def _crawl_single_shop(shop: str, hub: str, counts: dict):
                                     log.warning("Unknown XML type for %s", zip_info.filename)
             else:
                 # Try plain XML fallback
-                if lower_name.endswith('.xml') or resp.content.strip().startswith(b'<'):
+                if lower_name.endswith('.xml') or resp.body().strip().startswith(b'<'):
                     log.info(f"Processing plain XML file: {fname}")
-                    xml_type, rows = parse_xml(resp.content, shop_str)
+                    xml_type, rows = parse_xml(resp.body(), shop_str)
                     if xml_type:
                         counts["xmls"] += 1
                         counts["rows"] += len(rows)
@@ -1047,6 +1049,9 @@ def _crawl_single_shop(shop: str, hub: str, counts: dict):
                 
         except Exception as e:
             log.error("Error processing %s: %s", url, e)
+    
+    # Close the page when done
+    page.close()
 
 
 def main(target_shop: str | None = None):
