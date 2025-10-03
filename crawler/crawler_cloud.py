@@ -1115,7 +1115,12 @@ def main(target_shop: str | None = None):
             if hub in visited:
                 continue
             visited.add(hub)
-            _crawl_single_shop(shop, hub, counts)
+            try:
+                _crawl_single_shop(shop, hub, counts)
+            except Exception as e:
+                log.error(f"Failed to crawl shop {shop}: {e}")
+                # Continue with next shop instead of stopping
+                continue
 
     log.info("Downloaded %d files, parsed %d XMLs, extracted %d rows",
              counts["zips"], counts["xmls"], counts["rows"])
