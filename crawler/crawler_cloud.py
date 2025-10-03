@@ -782,7 +782,7 @@ def playwright_with_login(hub: str, creds: dict | None, shop: str = "retailer"):
 
 # ─────────────── ZIP/GZ DISCOVERY ────────────────────────────────────
 def zip_links(hub: str, creds: dict | None, shop: str = "retailer") -> tuple[list[str], object]:
-    """Get download URLs and return authenticated session for downloads."""
+    """Get download URLs and return authenticated context for downloads."""
     captured = set()
     pw, browser, page = playwright_with_login(hub, creds, shop)
     
@@ -855,10 +855,10 @@ def zip_links(hub: str, creds: dict | None, shop: str = "retailer") -> tuple[lis
         if href and ZIP_RX.search(href):
             captured.add(urljoin(hub, href))
     
-    # Return unique URLs and the authenticated page for downloads
+    # Return unique URLs and the authenticated context for downloads
     unique_urls = list(dict.fromkeys(u for u in captured if ZIP_RX.search(u)))
     log.info(f"Found {len(unique_urls)} download URLs for {shop}")
-    return unique_urls, page
+    return unique_urls, page.context
 
 
 # ───────────── XML NORMALISERS ───────────────────────────────────────
@@ -967,16 +967,15 @@ def _crawl_single_shop(shop: str, hub: str, counts: dict):
     creds = creds_for(shop)
     shop_str = str(shop) if shop else "retailer"
     # Use only Playwright-based authentication to avoid session conflicts
-    files, page = zip_links(hub, creds, shop_str)
+    files, context = zip_links(hub, creds, shop_str)
     if not files:
         log.warning("No files for %s", shop)
-        page.close()
         return
 
     for url in files:
         try:
-            # Use the authenticated page to download files
-            resp = page.request.get(url, timeout=120_000)
+            # Use the authenticated context to download files
+            resp = context.request.get(url, timeout=120_000)
             if resp.status != 200:
                 log.warning(f"Download failed for {url}: {resp.status}")
                 continue
@@ -1049,9 +1048,6 @@ def _crawl_single_shop(shop: str, hub: str, counts: dict):
                 
         except Exception as e:
             log.error("Error processing %s: %s", url, e)
-    
-    # Close the page when done
-    page.close()
 
 
 def main(target_shop: str | None = None):
