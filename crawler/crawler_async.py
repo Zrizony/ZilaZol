@@ -777,6 +777,7 @@ async def crawl_single_shop_async_robust(shop: str, hub: str, counts: dict):
         page = await context.new_page()
         
         # Navigate to the retailer URL
+        log.info(f"🟢 Starting downloads for retailer: {shop}")
         await page.goto(hub, timeout=30000)
         await page.wait_for_load_state("networkidle", timeout=30000)
         log.info(f"✅ Loaded: {page.url}")
@@ -927,6 +928,7 @@ async def crawl_single_shop_async_robust(shop: str, hub: str, counts: dict):
                 with open(local_file_path, 'wb') as f:
                     f.write(await response.body())
                 
+                log.info(f"📥 Downloaded file: {fname}")
                 log.info(f"💾 Saved {fname} locally")
                 
                 # Upload raw file to GCS
@@ -934,7 +936,7 @@ async def crawl_single_shop_async_robust(shop: str, hub: str, counts: dict):
                 try:
                     if upload_to_gcs(BUCKET_NAME, await response.body(), file_blob_name):
                         files_downloaded += 1
-                        log.info(f"☁️ Uploaded raw file {fname} to GCS")
+                        log.info(f"☁️ Uploaded to bucket: {file_blob_name}")
                     else:
                         log.error(f"❌ Failed to upload raw file {fname}")
                 except Exception as upload_err:
@@ -991,6 +993,7 @@ async def crawl_single_shop_async_robust(shop: str, hub: str, counts: dict):
                 continue
         
         # Final summary for this retailer
+        log.info(f"✅ Parsing complete: {shop}")
         log.info(f"✅ Downloaded {files_downloaded} files for {shop}")
         log.info(f"🧩 Parsed {items_parsed} items into JSON")
         log.info(f"☁️ Uploaded to GCS bucket {BUCKET_NAME}")

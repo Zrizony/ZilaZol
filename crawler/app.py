@@ -121,15 +121,24 @@ def test_endpoint():
 def fanout_run():
     """Fan-out runner: discovers retailers and crawls them completely."""
     import asyncio
-    from crawler_async import run_fanout_async  # new single entry point
+    from crawler_async import main_async  # use the working main function
 
     try:
-        res = asyncio.run(run_fanout_async())
-        # res is a dict summary we'll return to Cloud Scheduler
-        return (res, 200)
+        log.info("🚀 Starting crawler run...")
+        asyncio.run(main_async())
+        
+        return jsonify({
+            "status": "completed",
+            "message": "Crawler completed successfully",
+            "timestamp": datetime.now().isoformat()
+        }), 200
     except Exception as e:
         log.exception("Run failed")
-        return ({"ok": False, "error": str(e)}, 500)
+        return jsonify({
+            "status": "error", 
+            "message": f"Run failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 @app.route('/crawl-full', methods=['POST'])
 def run_crawler_full():
