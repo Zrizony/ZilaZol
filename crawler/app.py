@@ -125,16 +125,15 @@ def fanout_run():
     This avoids self-referencing HTTP calls that can cause issues in Cloud Run.
     """
     try:
-        from crawler_cloud import retailer_links, slug, _crawl_single_shop
-        import threading
-        import time
         import asyncio
+        from crawler_async import main_async, retailer_links_async
+        from crawler_cloud import slug
         
-        log.info("🚀 Starting fan-out crawler run...")
+        log.info("🚀 Starting fan-out crawler run (async)...")
         
         # Get retailer links with fallback
         try:
-            links = retailer_links()
+            links = asyncio.run(retailer_links_async())
             if not links:
                 log.warning("⚠️ No retailer links found, trying cached/fallback approach...")
                 # You could implement a cached list of known retailers here as a fallback
@@ -155,56 +154,35 @@ def fanout_run():
                 "error_type": "retailer_links_failure"
             }), 503  # Service Unavailable instead of 500
         
-        # Initialize counters
-        counts = {"zips": 0, "xmls": 0, "rows": 0}
-        visited = set()
-        triggered = []
-        failed_shops = []
-        
-        # Process each shop sequentially to avoid asyncio conflicts
-        for shop, hub in links.items():
-            if hub in visited:
-                continue
-            visited.add(hub)
+        # Run the async crawler
+        try:
+            log.info("🎭 Running async crawler...")
+            asyncio.run(main_async())
             
-            shop_slug = slug(shop)
-            triggered.append(shop_slug)
+            # For now, we'll return a simple success message
+            # The actual results are logged by the crawler
+            triggered = [slug(shop) for shop in links.keys()]
             
-            try:
-                log.info(f"🔄 Starting crawl for shop: {shop}")
-                
-                # Run the crawl directly (not via HTTP request)
-                _crawl_single_shop(shop, hub, counts)
-                
-                log.info(f"✅ Completed crawl for shop: {shop}")
-                
-            except Exception as e:
-                log.error(f"❌ Failed to crawl shop {shop}: {e}")
-                failed_shops.append({"shop": shop_slug, "error": str(e)})
-                continue
-        
-        # Log final results
-        log.info(f"🎯 Fan-out crawl completed:")
-        log.info(f"   • Shops processed: {len(triggered)}")
-        log.info(f"   • Shops failed: {len(failed_shops)}")
-        log.info(f"   • Files downloaded: {counts['zips']}")
-        log.info(f"   • XMLs parsed: {counts['xmls']}")
-        log.info(f"   • Rows extracted: {counts['rows']}")
-        
-        return jsonify({
-            "status": "completed",
-            "message": "Fan-out crawler completed successfully",
-            "timestamp": datetime.now().isoformat(),
-            "results": {
-                "shops_processed": len(triggered),
-                "shops_failed": len(failed_shops),
-                "files_downloaded": counts["zips"],
-                "xmls_parsed": counts["xmls"],
-                "rows_extracted": counts["rows"]
-            },
-            "triggered": triggered,
-            "failed_shops": failed_shops
-        }), 200
+            return jsonify({
+                "status": "completed",
+                "message": "Async crawler completed successfully",
+                "timestamp": datetime.now().isoformat(),
+                "results": {
+                    "shops_processed": len(triggered),
+                    "message": "Check logs for detailed results"
+                },
+                "triggered": triggered
+            }), 200
+            
+        except Exception as e:
+            log.error(f"❌ Async crawler failed: {e}")
+            import traceback
+            log.error(f"Stack trace: {traceback.format_exc()}")
+            return jsonify({
+                "status": "error",
+                "message": f"Async crawler error: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }), 500
         
     except Exception as e:
         log.error(f"❌ Fan-out run failed: {e}")
