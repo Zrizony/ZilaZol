@@ -131,17 +131,28 @@ def fanout_run():
         
         log.info("🚀 Starting fan-out crawler run...")
         
-        # Get retailer links
+        # Get retailer links with fallback
         try:
             links = retailer_links()
+            if not links:
+                log.warning("⚠️ No retailer links found, trying cached/fallback approach...")
+                # You could implement a cached list of known retailers here as a fallback
+                # For now, we'll return an error but with more helpful information
+                return jsonify({
+                    "status": "error",
+                    "message": "No retailer links available. The government website may be temporarily unavailable.",
+                    "timestamp": datetime.now().isoformat(),
+                    "suggestion": "Try again later or check if the government website is accessible"
+                }), 503  # Service Unavailable instead of 500
             log.info(f"📋 Found {len(links)} retailers to crawl")
         except Exception as e:
             log.error(f"❌ Failed to get retailer links: {e}")
             return jsonify({
                 "status": "error",
                 "message": f"Failed to get retailer links: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            }), 500
+                "timestamp": datetime.now().isoformat(),
+                "error_type": "retailer_links_failure"
+            }), 503  # Service Unavailable instead of 500
         
         # Initialize counters
         counts = {"zips": 0, "xmls": 0, "rows": 0}

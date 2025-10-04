@@ -507,32 +507,75 @@ def _to_float(t: str):
 
 # ───────────── RETAILER LIST ─────────────────────────────────────────
 def retailer_links() -> dict[str, str]:
-    html = requests.get(ROOT, headers={"User-Agent": UA}, timeout=30).text
-    m = re.search(r'data-url="([^"]+?price[^"]+?)"', html)
-    if m:  # JSON endpoint (fastest)
-        api = urljoin(ROOT, m.group(1))
-        data = requests.get(api, headers={"User-Agent": UA}).json()
-        return {r["RetailerName"].strip(): r["PriceLink"] for r in data}
+    """Get retailer links with improved timeout handling and fallbacks"""
+    log.info("🔍 Fetching retailer links from government website...")
+    
+    try:
+        # Try the fast JSON API approach first
+        log.info("📡 Attempting fast JSON API method...")
+        html = requests.get(ROOT, headers={"User-Agent": UA}, timeout=15).text
+        m = re.search(r'data-url="([^"]+?price[^"]+?)"', html)
+        if m:  # JSON endpoint (fastest)
+            api = urljoin(ROOT, m.group(1))
+            log.info(f"📡 Found JSON API endpoint: {api}")
+            data = requests.get(api, headers={"User-Agent": UA}, timeout=10).json()
+            links = {r["RetailerName"].strip(): r["PriceLink"] for r in data}
+            log.info(f"✅ JSON API method successful: {len(links)} retailers found")
+            return links
+        else:
+            log.warning("⚠️ JSON API endpoint not found, trying Playwright fallback...")
+    except Exception as e:
+        log.warning(f"⚠️ JSON API method failed: {e}, trying Playwright fallback...")
 
-    # fallback: render gov.il with Playwright
-    with sync_playwright() as pw:
-        br = pw.chromium.launch(
-            args=["--ignore-certificate-errors", "--no-sandbox", "--disable-dev-shm-usage"],
-            headless=True
-        )
-        pg = br.new_page(user_agent=UA, locale="he-IL")
-        pg.goto(ROOT, timeout=45_000)
-        pg.wait_for_selector("tr >> text=מחיר")
-        links = {}
-        for tr in pg.query_selector_all("tr:has(a:has-text('מחיר'))"):
-            td = tr.query_selector("td")
-            name = td.inner_text().strip() if td else ""
-            a_tag = tr.query_selector("a:has-text('מחיר')")
-            href = a_tag.get_attribute("href") if a_tag else None
-            if name and href:
-                links[name] = urljoin(ROOT, href)
-        br.close()
-        return links
+    # Fallback: render gov.il with Playwright (with better timeout handling)
+    try:
+        log.info("🎭 Starting Playwright fallback method...")
+        with sync_playwright() as pw:
+            br = pw.chromium.launch(
+                args=["--ignore-certificate-errors", "--no-sandbox", "--disable-dev-shm-usage"],
+                headless=True
+            )
+            pg = br.new_page(user_agent=UA, locale="he-IL")
+            
+            # Set a reasonable timeout for page load
+            pg.goto(ROOT, timeout=30_000)
+            
+            # Wait for the price table with a reasonable timeout
+            try:
+                pg.wait_for_selector("tr >> text=מחיר", timeout=20_000)
+                log.info("✅ Price table loaded successfully")
+            except TimeoutError:
+                log.warning("⚠️ Price table timeout, trying alternative selectors...")
+                # Try alternative selectors
+                try:
+                    pg.wait_for_selector("table", timeout=10_000)
+                    log.info("✅ Found table element, proceeding...")
+                except TimeoutError:
+                    log.error("❌ Could not find any table elements")
+                    br.close()
+                    return {}
+            
+            links = {}
+            for tr in pg.query_selector_all("tr:has(a:has-text('מחיר'))"):
+                td = tr.query_selector("td")
+                name = td.inner_text().strip() if td else ""
+                a_tag = tr.query_selector("a:has-text('מחיר')")
+                href = a_tag.get_attribute("href") if a_tag else None
+                if name and href:
+                    links[name] = urljoin(ROOT, href)
+            
+            br.close()
+            
+            if links:
+                log.info(f"✅ Playwright method successful: {len(links)} retailers found")
+                return links
+            else:
+                log.error("❌ Playwright method found no retailers")
+                return {}
+                
+    except Exception as e:
+        log.error(f"❌ Playwright fallback method failed: {e}")
+        return {}
 
 
 # ─────────────── PLAYWRIGHT LOGIN + PAGE ─────────────────────────────
