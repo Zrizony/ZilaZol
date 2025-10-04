@@ -136,23 +136,36 @@ def fanout_run():
             links = asyncio.run(retailer_links_async())
             if not links:
                 log.warning("⚠️ No retailer links found, trying cached/fallback approach...")
-                # You could implement a cached list of known retailers here as a fallback
-                # For now, we'll return an error but with more helpful information
+                
+                # No fallback links available - the government website is the source of truth
+                log.error("❌ No retailer links found from government website")
+                log.info("💡 This usually means:")
+                log.info("   • Government website structure has changed")
+                log.info("   • Website is temporarily unavailable") 
+                log.info("   • Network connectivity issues")
+                log.info("   • Playwright selectors need updating")
+                
                 return jsonify({
                     "status": "error",
-                    "message": "No retailer links available. The government website may be temporarily unavailable.",
+                    "message": "Cannot find retailer links from government website",
+                    "details": "The government website may have changed structure or be temporarily unavailable",
                     "timestamp": datetime.now().isoformat(),
-                    "suggestion": "Try again later or check if the government website is accessible"
-                }), 503  # Service Unavailable instead of 500
-            log.info(f"📋 Found {len(links)} retailers to crawl")
+                    "suggestion": "Check government website manually and update selectors if needed"
+                }), 503
+            else:
+                log.info(f"📋 Found {len(links)} retailers to crawl")
         except Exception as e:
             log.error(f"❌ Failed to get retailer links: {e}")
+            import traceback
+            log.error(f"Stack trace: {traceback.format_exc()}")
+            
             return jsonify({
                 "status": "error",
                 "message": f"Failed to get retailer links: {str(e)}",
+                "details": "Exception occurred while trying to fetch retailer links from government website",
                 "timestamp": datetime.now().isoformat(),
                 "error_type": "retailer_links_failure"
-            }), 503  # Service Unavailable instead of 500
+            }), 503
         
         # Run the async crawler
         try:

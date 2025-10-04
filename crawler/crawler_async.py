@@ -50,7 +50,7 @@ async def retailer_links_async() -> dict[str, str]:
     except Exception as e:
         log.warning(f"⚠️ JSON API method failed: {e}, trying async Playwright fallback...")
 
-    # Fallback: render gov.il with async Playwright
+    # Fallback: render gov.il with improved async Playwright
     try:
         log.info("🎭 Starting async Playwright fallback method...")
         async with async_playwright() as pw:
@@ -61,40 +61,143 @@ async def retailer_links_async() -> dict[str, str]:
             pg = await br.new_page(user_agent=UA, locale="he-IL")
             
             # Set a reasonable timeout for page load
-            await pg.goto(ROOT, timeout=30_000)
+            await pg.goto(ROOT, timeout=45_000)
             
-            # Wait for the price table with a reasonable timeout
+            # Wait for page to fully load
             try:
-                await pg.wait_for_selector("tr >> text=מחיר", timeout=20_000)
-                log.info("✅ Price table loaded successfully")
+                await pg.wait_for_load_state("networkidle", timeout=30_000)
+                log.info("✅ Page loaded and network idle")
             except TimeoutError:
-                log.warning("⚠️ Price table timeout, trying alternative selectors...")
-                # Try alternative selectors
-                try:
-                    await pg.wait_for_selector("table", timeout=10_000)
-                    log.info("✅ Found table element, proceeding...")
-                except TimeoutError:
-                    log.error("❌ Could not find any table elements")
-                    await br.close()
-                    return {}
+                log.warning("⚠️ Network idle timeout, continuing anyway...")
             
+            # Try multiple selectors for the retailer links table
+            retailer_table_selectors = [
+                # Look for any table with links
+                "table tr:has(a[href])",
+                "tbody tr:has(a)",
+                "table tr",
+                "table",
+                # Look for divs or sections with retailer links
+                "div:has(a[href])",
+                "section:has(a[href])",
+                # Look for any clickable links
+                "a[href]",
+                # Generic fallbacks
+                "tr",
+                "div",
+                "section"
+            ]
+            
+            table_found = False
+            for selector in retailer_table_selectors:
+                try:
+                    await pg.wait_for_selector(selector, timeout=10_000)
+                    log.info(f"✅ Found retailer content with selector: {selector}")
+                    table_found = True
+                    break
+                except TimeoutError:
+                    log.debug(f"Selector '{selector}' not found, trying next...")
+                    continue
+            
+            if not table_found:
+                log.error("❌ Could not find any table elements with any selector")
+                # Take a screenshot for debugging
+                try:
+                    screenshot_path = f"/tmp/debug_no_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    await pg.screenshot(path=screenshot_path, full_page=True)
+                    log.info(f"📸 Debug screenshot saved: {screenshot_path}")
+                except Exception as e:
+                    log.warning(f"Could not save debug screenshot: {e}")
+                
+                await br.close()
+                return {}
+            
+            # Extract links with multiple methods
             links = {}
-            for tr in await pg.query_selector_all("tr:has(a:has-text('מחיר'))"):
-                td = await tr.query_selector("td")
-                name = await td.inner_text() if td else ""
-                name = name.strip()
-                a_tag = await tr.query_selector("a:has-text('מחיר')")
-                href = await a_tag.get_attribute("href") if a_tag else None
-                if name and href:
-                    links[name] = urljoin(ROOT, href)
+            
+            # Method 1: Look for rows with retailer links (any links in table rows)
+            try:
+                retailer_rows = await pg.query_selector_all("tr:has(a[href])")
+                log.info(f"Found {len(retailer_rows)} rows with retailer links")
+                
+                for tr in retailer_rows:
+                    # Get retailer name from first cell
+                    first_cell = await tr.query_selector("td:first-child, th:first-child")
+                    name = (await first_cell.inner_text()).strip() if first_cell else ""
+                    
+                    # Get the link
+                    a_tag = await tr.query_selector("a[href]")
+                    href = await a_tag.get_attribute("href") if a_tag else None
+                    
+                    if name and href and len(name) > 3:  # Valid retailer name
+                        links[name] = urljoin(ROOT, href)
+                        log.debug(f"Found retailer link: {name} -> {href}")
+            except Exception as e:
+                log.warning(f"Method 1 failed: {e}")
+            
+            # Method 2: Look for any links in table rows (broader search)
+            if not links:
+                try:
+                    all_rows = await pg.query_selector_all("table tr")
+                    log.info(f"Trying method 2 with {len(all_rows)} total rows")
+                    
+                    for tr in all_rows:
+                        # Get the first cell (retailer name)
+                        first_cell = await tr.query_selector("td:first-child, th:first-child")
+                        if not first_cell:
+                            continue
+                            
+                        name = (await first_cell.inner_text()).strip()
+                        if not name or len(name) < 3:
+                            continue
+                        
+                        # Look for any link in this row
+                        link_element = await tr.query_selector("a[href]")
+                        if link_element:
+                            href = await link_element.get_attribute("href")
+                            link_text = (await link_element.inner_text()).strip()
+                            
+                            # Accept any link that looks like a retailer website
+                            if href and (not link_text or len(link_text) > 0):
+                                links[name] = urljoin(ROOT, href)
+                                log.debug(f"Found retailer link (method 2): {name} -> {href}")
+                except Exception as e:
+                    log.warning(f"Method 2 failed: {e}")
+            
+            # Method 3: Look for any links on the page (last resort)
+            if not links:
+                try:
+                    log.info("Trying method 3: scanning all links on page")
+                    all_links = await pg.query_selector_all("a[href]")
+                    
+                    for link in all_links:
+                        href = await link.get_attribute("href")
+                        link_text = (await link.inner_text()).strip()
+                        
+                        # Look for retailer website links (any external links)
+                        if href and (href.startswith('http') or href.startswith('//')):
+                            # Try to find the retailer name from nearby elements
+                            parent_row = await link.query_selector("xpath=ancestor::tr")
+                            if parent_row:
+                                first_cell = await parent_row.query_selector("td:first-child, th:first-child")
+                                if first_cell:
+                                    name = (await first_cell.inner_text()).strip()
+                                    if name and len(name) > 3:
+                                        links[name] = href if href.startswith('http') else urljoin(ROOT, href)
+                                        log.debug(f"Found retailer link (method 3): {name} -> {href}")
+                except Exception as e:
+                    log.warning(f"Method 3 failed: {e}")
             
             await br.close()
             
             if links:
                 log.info(f"✅ Async Playwright method successful: {len(links)} retailers found")
+                # Log first few for debugging
+                for i, (name, url) in enumerate(list(links.items())[:3], 1):
+                    log.info(f"   {i}. {name[:50]}... -> {url[:50]}...")
                 return links
             else:
-                log.error("❌ Async Playwright method found no retailers")
+                log.error("❌ Async Playwright method found no retailers with any method")
                 return {}
                 
     except Exception as e:
