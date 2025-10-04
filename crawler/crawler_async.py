@@ -70,134 +70,206 @@ async def retailer_links_async() -> dict[str, str]:
             except TimeoutError:
                 log.warning("⚠️ Network idle timeout, continuing anyway...")
             
-            # Try multiple selectors for the retailer links table
-            retailer_table_selectors = [
-                # Look for any table with links
-                "table tr:has(a[href])",
-                "tbody tr:has(a)",
-                "table tr",
-                "table",
-                # Look for divs or sections with retailer links
-                "div:has(a[href])",
-                "section:has(a[href])",
-                # Look for any clickable links
-                "a[href]",
-                # Generic fallbacks
-                "tr",
-                "div",
-                "section"
-            ]
-            
-            table_found = False
-            for selector in retailer_table_selectors:
-                try:
-                    await pg.wait_for_selector(selector, timeout=10_000)
-                    log.info(f"✅ Found retailer content with selector: {selector}")
-                    table_found = True
-                    break
-                except TimeoutError:
-                    log.debug(f"Selector '{selector}' not found, trying next...")
-                    continue
-            
-            if not table_found:
-                log.error("❌ Could not find any table elements with any selector")
-                # Take a screenshot for debugging
-                try:
-                    screenshot_path = f"/tmp/debug_no_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                    await pg.screenshot(path=screenshot_path, full_page=True)
-                    log.info(f"📸 Debug screenshot saved: {screenshot_path}")
-                except Exception as e:
-                    log.warning(f"Could not save debug screenshot: {e}")
-                
-                await br.close()
-                return {}
-            
-            # Extract links with multiple methods
+            # Target the specific Hebrew button text "לצפייה במחירים"
             links = {}
             
-            # Method 1: Look for rows with retailer links (any links in table rows)
+            # Method 1: Look for links with the specific Hebrew text
             try:
-                retailer_rows = await pg.query_selector_all("tr:has(a[href])")
-                log.info(f"Found {len(retailer_rows)} rows with retailer links")
+                log.info("🎯 Looking for Hebrew 'לצפייה במחירים' buttons...")
                 
-                for tr in retailer_rows:
-                    # Get retailer name from first cell
-                    first_cell = await tr.query_selector("td:first-child, th:first-child")
-                    name = (await first_cell.inner_text()).strip() if first_cell else ""
+                # Try different selectors for the Hebrew button text
+                hebrew_selectors = [
+                    "a:has-text('לצפייה במחירים')",
+                    "button:has-text('לצפייה במחירים')",
+                    "a[href]:has-text('לצפייה במחירים')",
+                    "button[onclick]:has-text('לצפייה במחירים')",
+                    # Also try with partial text matching
+                    "a:has-text('לצפייה')",
+                    "button:has-text('לצפייה')",
+                    "a:has-text('מחירים')",
+                    "button:has-text('מחירים')",
+                    # Look for elements containing the text (alternative syntax)
+                    "a:contains('לצפייה במחירים')",
+                    "button:contains('לצפייה במחירים')",
+                    "a:contains('לצפייה')",
+                    "button:contains('לצפייה')",
+                    # Try role-based selectors
+                    "a[role='button']:has-text('לצפייה')",
+                    "button[type='button']:has-text('לצפייה')",
+                    # Generic link/button with Hebrew text
+                    "*[href]:has-text('לצפייה')",
+                    "*[onclick]:has-text('לצפייה')"
+                ]
+                
+                buttons_found = []
+                for selector in hebrew_selectors:
+                    try:
+                        elements = await pg.query_selector_all(selector)
+                        if elements:
+                            buttons_found.extend(elements)
+                            log.info(f"✅ Found {len(elements)} elements with selector: {selector}")
+                            break  # Use the first successful selector
+                    except Exception as e:
+                        log.debug(f"Selector '{selector}' failed: {e}")
+                        continue
+                
+                if not buttons_found:
+                    log.warning("⚠️ No Hebrew buttons found with text selectors, trying alternative methods...")
                     
-                    # Get the link
-                    a_tag = await tr.query_selector("a[href]")
-                    href = await a_tag.get_attribute("href") if a_tag else None
-                    
-                    if name and href and len(name) > 3:  # Valid retailer name
-                        links[name] = urljoin(ROOT, href)
-                        log.debug(f"Found retailer link: {name} -> {href}")
-            except Exception as e:
-                log.warning(f"Method 1 failed: {e}")
-            
-            # Method 2: Look for any links in table rows (broader search)
-            if not links:
-                try:
-                    all_rows = await pg.query_selector_all("table tr")
-                    log.info(f"Trying method 2 with {len(all_rows)} total rows")
-                    
-                    for tr in all_rows:
-                        # Get the first cell (retailer name)
-                        first_cell = await tr.query_selector("td:first-child, th:first-child")
-                        if not first_cell:
-                            continue
-                            
-                        name = (await first_cell.inner_text()).strip()
-                        if not name or len(name) < 3:
-                            continue
+                    # Alternative: Look for buttons/links near retailer names in tables
+                    try:
+                        # Find all table rows that might contain retailer info
+                        table_rows = await pg.query_selector_all("tr")
+                        log.info(f"Found {len(table_rows)} table rows to examine")
                         
-                        # Look for any link in this row
-                        link_element = await tr.query_selector("a[href]")
-                        if link_element:
-                            href = await link_element.get_attribute("href")
-                            link_text = (await link_element.inner_text()).strip()
+                        for i, row in enumerate(table_rows):
+                            try:
+                                # Get all cells in the row
+                                cells = await row.query_selector_all("td, th")
+                                if len(cells) < 2:
+                                    continue
+                                
+                                # First cell usually contains retailer name
+                                first_cell = cells[0]
+                                retailer_name = (await first_cell.inner_text()).strip()
+                                
+                                if not retailer_name or len(retailer_name) < 3:
+                                    continue
+                                
+                                # Look for buttons/links in this row
+                                row_buttons = await row.query_selector_all("a, button")
+                                for button in row_buttons:
+                                    button_text = (await button.inner_text()).strip()
+                                    button_href = await button.get_attribute("href")
+                                    
+                                    # Check if this button has the Hebrew text or similar
+                                    if ("לצפייה" in button_text or "מחירים" in button_text or 
+                                        "צפייה" in button_text or "price" in button_text.lower()):
+                                        
+                                        if button_href:
+                                            links[retailer_name] = urljoin(ROOT, button_href)
+                                            log.info(f"✅ Found retailer button: {retailer_name} -> {button_href}")
+                                        elif await button.get_attribute("onclick"):
+                                            # Handle onclick buttons - extract URL from onclick
+                                            onclick = await button.get_attribute("onclick")
+                                            if "window.open" in onclick or "location.href" in onclick:
+                                                # Extract URL from onclick
+                                                import re
+                                                url_match = re.search(r"['\"]([^'\"]+)['\"]", onclick)
+                                                if url_match:
+                                                    extracted_url = url_match.group(1)
+                                                    links[retailer_name] = urljoin(ROOT, extracted_url)
+                                                    log.info(f"✅ Found retailer onclick: {retailer_name} -> {extracted_url}")
+                                    
+                            except Exception as e:
+                                log.debug(f"Error processing row {i}: {e}")
+                                continue
+                                
+                    except Exception as e:
+                        log.warning(f"Alternative method failed: {e}")
+                else:
+                    # Process the found buttons
+                    for i, button in enumerate(buttons_found):
+                        try:
+                            button_text = (await button.inner_text()).strip()
+                            button_href = await button.get_attribute("href")
                             
-                            # Accept any link that looks like a retailer website
-                            if href and (not link_text or len(link_text) > 0):
-                                links[name] = urljoin(ROOT, href)
-                                log.debug(f"Found retailer link (method 2): {name} -> {href}")
-                except Exception as e:
-                    log.warning(f"Method 2 failed: {e}")
-            
-            # Method 3: Look for any links on the page (last resort)
-            if not links:
-                try:
-                    log.info("Trying method 3: scanning all links on page")
-                    all_links = await pg.query_selector_all("a[href]")
-                    
-                    for link in all_links:
-                        href = await link.get_attribute("href")
-                        link_text = (await link.inner_text()).strip()
-                        
-                        # Look for retailer website links (any external links)
-                        if href and (href.startswith('http') or href.startswith('//')):
-                            # Try to find the retailer name from nearby elements
-                            parent_row = await link.query_selector("xpath=ancestor::tr")
+                            # Try to find retailer name from parent elements
+                            retailer_name = None
+                            
+                            # Look for retailer name in the same row or parent container
+                            parent_row = await button.query_selector("xpath=ancestor::tr")
                             if parent_row:
                                 first_cell = await parent_row.query_selector("td:first-child, th:first-child")
                                 if first_cell:
-                                    name = (await first_cell.inner_text()).strip()
-                                    if name and len(name) > 3:
-                                        links[name] = href if href.startswith('http') else urljoin(ROOT, href)
-                                        log.debug(f"Found retailer link (method 3): {name} -> {href}")
+                                    retailer_name = (await first_cell.inner_text()).strip()
+                            
+                            # If no name found in row, look in parent div/container
+                            if not retailer_name:
+                                parent_container = await button.query_selector("xpath=ancestor::div[contains(@class, 'row') or contains(@class, 'card') or contains(@class, 'item')]")
+                                if parent_container:
+                                    name_element = await parent_container.query_selector("h1, h2, h3, h4, h5, h6, .title, .name, .retailer")
+                                    if name_element:
+                                        retailer_name = (await name_element.inner_text()).strip()
+                            
+                            # Fallback: use button text or index
+                            if not retailer_name:
+                                retailer_name = button_text or f"Retailer_{i+1}"
+                            
+                            if button_href:
+                                links[retailer_name] = urljoin(ROOT, button_href)
+                                log.info(f"✅ Found retailer link: {retailer_name} -> {button_href}")
+                            else:
+                                # Handle onclick buttons
+                                onclick = await button.get_attribute("onclick")
+                                if onclick:
+                                    import re
+                                    url_match = re.search(r"['\"]([^'\"]+)['\"]", onclick)
+                                    if url_match:
+                                        extracted_url = url_match.group(1)
+                                        links[retailer_name] = urljoin(ROOT, extracted_url)
+                                        log.info(f"✅ Found retailer onclick: {retailer_name} -> {extracted_url}")
+                                        
+                        except Exception as e:
+                            log.warning(f"Error processing button {i}: {e}")
+                            continue
+                
+            except Exception as e:
+                log.error(f"❌ Hebrew button detection failed: {e}")
+                import traceback
+                log.error(f"Stack trace: {traceback.format_exc()}")
+            
+            # Method 2: Fallback - scan all links on page if no Hebrew buttons found
+            if not links:
+                try:
+                    log.info("🔄 Fallback: Scanning all links on page for retailer websites...")
+                    all_links = await pg.query_selector_all("a[href]")
+                    log.info(f"Found {len(all_links)} total links on page")
+                    
+                    for i, link in enumerate(all_links):
+                        try:
+                            href = await link.get_attribute("href")
+                            link_text = (await link.inner_text()).strip()
+                            
+                            # Look for retailer website links (external URLs)
+                            if href and (href.startswith('http') or href.startswith('//')):
+                                # Try to find retailer name from nearby elements
+                                parent_row = await link.query_selector("xpath=ancestor::tr")
+                                if parent_row:
+                                    first_cell = await parent_row.query_selector("td:first-child, th:first-child")
+                                    if first_cell:
+                                        name = (await first_cell.inner_text()).strip()
+                                        if name and len(name) > 3 and not name.startswith('http'):
+                                            links[name] = href if href.startswith('http') else urljoin(ROOT, href)
+                                            log.info(f"✅ Found retailer link (fallback): {name} -> {href}")
+                                            
+                        except Exception as e:
+                            log.debug(f"Error processing link {i}: {e}")
+                            continue
+                            
                 except Exception as e:
-                    log.warning(f"Method 3 failed: {e}")
+                    log.warning(f"Fallback method failed: {e}")
             
             await br.close()
             
             if links:
                 log.info(f"✅ Async Playwright method successful: {len(links)} retailers found")
-                # Log first few for debugging
-                for i, (name, url) in enumerate(list(links.items())[:3], 1):
-                    log.info(f"   {i}. {name[:50]}... -> {url[:50]}...")
+                log.info(f"🎯 Found {len(links)} retailer links: {list(links.keys())}")
+                
+                # Log first few URLs for debugging
+                for i, (name, url) in enumerate(list(links.items())[:5], 1):
+                    log.info(f"   {i}. {name[:50]}... -> {url[:80]}...")
+                
                 return links
             else:
                 log.error("❌ Async Playwright method found no retailers with any method")
+                # Take a debug screenshot
+                try:
+                    screenshot_path = f"/tmp/debug_no_retailers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    await pg.screenshot(path=screenshot_path, full_page=True)
+                    log.info(f"📸 Debug screenshot saved: {screenshot_path}")
+                except Exception as e:
+                    log.warning(f"Could not save debug screenshot: {e}")
                 return {}
                 
     except Exception as e:
