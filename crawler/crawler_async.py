@@ -154,7 +154,6 @@ async def retailer_links_async() -> dict[str, str]:
                                             onclick = await button.get_attribute("onclick")
                                             if "window.open" in onclick or "location.href" in onclick:
                                                 # Extract URL from onclick
-                                                import re
                                                 url_match = re.search(r"['\"]([^'\"]+)['\"]", onclick)
                                                 if url_match:
                                                     extracted_url = url_match.group(1)
@@ -203,7 +202,6 @@ async def retailer_links_async() -> dict[str, str]:
                                 # Handle onclick buttons
                                 onclick = await button.get_attribute("onclick")
                                 if onclick:
-                                    import re
                                     url_match = re.search(r"['\"]([^'\"]+)['\"]", onclick)
                                     if url_match:
                                         extracted_url = url_match.group(1)
