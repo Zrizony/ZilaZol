@@ -737,6 +737,293 @@ async def crawl_single_shop_async(shop: str, hub: str, counts: dict):
             except Exception as e:
                 log.warning(f"Failed to dispose API context for {shop}: {e}")
 
+async def crawl_single_shop_async_robust(shop: str, hub: str, counts: dict):
+    """Robust version of single shop crawler with detailed logging and proper error handling."""
+    from playwright.async_api import async_playwright
+    
+    creds = creds_for(shop)
+    shop_str = str(shop) if shop else "retailer"
+    shop_slug = slug(shop_str)
+    
+    # Create local directories for this retailer
+    local_download_dir = Path(f"/tmp/{shop_slug}")
+    local_json_dir = Path(f"/tmp/json_out/{shop_slug}")
+    local_download_dir.mkdir(parents=True, exist_ok=True)
+    local_json_dir.mkdir(parents=True, exist_ok=True)
+    
+    playwright_instance = None
+    browser = None
+    context = None
+    
+    try:
+        log.info(f"🔐 Attempting login for {shop}")
+        
+        # Initialize Playwright
+        playwright_instance = await async_playwright().start()
+        browser = await playwright_instance.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor"
+            ]
+        )
+        context = await browser.new_context(
+            user_agent=UA,
+            viewport={"width": 1280, "height": 720}
+        )
+        page = await context.new_page()
+        
+        # Navigate to the retailer URL
+        await page.goto(hub, timeout=30000)
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        log.info(f"✅ Loaded: {page.url}")
+        
+        # Take screenshot after successful load
+        screenshot_path = f"/tmp/screenshots/{shop_slug}_after_login.png"
+        await page.screenshot(path=screenshot_path)
+        log.info(f"📸 Screenshot saved: {screenshot_path}")
+        
+        # Handle login if credentials exist
+        if creds and creds.get("username"):
+            log.info(f"🔑 Logging in with username: {creds['username']}")
+            
+            # Look for login form elements
+            username_selectors = [
+                'input[name="username"]',
+                'input[name="user"]', 
+                'input[name="login"]',
+                'input[type="email"]',
+                'input[type="text"]'
+            ]
+            
+            password_selectors = [
+                'input[name="password"]',
+                'input[name="pass"]',
+                'input[type="password"]'
+            ]
+            
+            login_button_selectors = [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("כניסה")',
+                'button:has-text("התחבר")',
+                'button:has-text("Login")'
+            ]
+            
+            # Try to find and fill username field
+            username_filled = False
+            for selector in username_selectors:
+                try:
+                    if await page.locator(selector).count() > 0:
+                        await page.fill(selector, creds["username"])
+                        username_filled = True
+                        log.info(f"✅ Filled username field with selector: {selector}")
+                        break
+                except Exception as e:
+                    log.debug(f"Failed selector {selector}: {e}")
+                    continue
+            
+            # Try to fill password if it exists
+            if creds.get("password"):
+                for selector in password_selectors:
+                    try:
+                        if await page.locator(selector).count() > 0:
+                            await page.fill(selector, creds["password"])
+                            log.info(f"✅ Filled password field with selector: {selector}")
+                            break
+                    except Exception as e:
+                        log.debug(f"Failed password selector {selector}: {e}")
+                        continue
+            
+            # Try to click login button
+            if username_filled:
+                for selector in login_button_selectors:
+                    try:
+                        if await page.locator(selector).count() > 0:
+                            await page.click(selector)
+                            log.info(f"✅ Clicked login button with selector: {selector}")
+                            break
+                    except Exception as e:
+                        log.debug(f"Failed login button selector {selector}: {e}")
+                        continue
+                
+                # Wait for navigation after login
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    log.info(f"✅ Login completed, current URL: {page.url}")
+                    
+                    # Take screenshot after login
+                    screenshot_path = f"/tmp/screenshots/{shop_slug}_after_login_success.png"
+                    await page.screenshot(path=screenshot_path)
+                    log.info(f"📸 Post-login screenshot saved: {screenshot_path}")
+                    
+                except Exception as e:
+                    log.warning(f"⚠️ Login may have failed or timed out: {e}")
+        
+        # Now look for file download links
+        log.info(f"🔍 Scanning {shop} for download links...")
+        
+        # Look for various file types
+        file_selectors = [
+            'a[href*=".zip"]',
+            'a[href*=".gz"]', 
+            'a[href*=".xml"]',
+            'a[href*="Price"]',
+            'a[href*="price"]',
+            'a[href*="download"]',
+            'a[href*="Download"]'
+        ]
+        
+        file_links = []
+        for selector in file_selectors:
+            try:
+                elements = await page.locator(selector).all()
+                for element in elements:
+                    href = await element.get_attribute("href")
+                    if href:
+                        # Convert relative URLs to absolute
+                        if href.startswith("/"):
+                            href = f"{hub.rstrip('/')}{href}"
+                        elif not href.startswith("http"):
+                            href = f"{hub.rstrip('/')}/{href}"
+                        file_links.append(href)
+            except Exception as e:
+                log.debug(f"Failed selector {selector}: {e}")
+                continue
+        
+        # Remove duplicates
+        file_links = list(set(file_links))
+        
+        if not file_links:
+            log.warning(f"⚠️ No files found for {shop}")
+            return
+        
+        log.info(f"📦 Found {len(file_links)} files to download for {shop}")
+        
+        # Download and process each file
+        files_downloaded = 0
+        items_parsed = 0
+        
+        for i, url in enumerate(file_links, 1):
+            try:
+                log.info(f"📥 Downloading file {i}/{len(file_links)}: {url}")
+                
+                # Download file using page context
+                response = await page.request.get(url, timeout=120000)
+                if response.status != 200:
+                    log.warning(f"❌ Download failed for {url}: HTTP {response.status}")
+                    continue
+                
+                # Get filename from URL
+                fname = Path(urlparse(url).path).name
+                if not fname:
+                    fname = f"file_{i}.zip"
+                
+                # Save file locally
+                local_file_path = local_download_dir / fname
+                with open(local_file_path, 'wb') as f:
+                    f.write(await response.body())
+                
+                log.info(f"💾 Saved {fname} locally")
+                
+                # Upload raw file to GCS
+                file_blob_name = f"downloads/{shop_slug}/{fname}"
+                try:
+                    if upload_to_gcs(BUCKET_NAME, await response.body(), file_blob_name):
+                        files_downloaded += 1
+                        log.info(f"☁️ Uploaded raw file {fname} to GCS")
+                    else:
+                        log.error(f"❌ Failed to upload raw file {fname}")
+                except Exception as upload_err:
+                    log.error(f"❌ Exception uploading raw file {fname}: {upload_err}")
+                
+                # Process file content and convert to JSON
+                file_data = await response.body()
+                magic2 = file_data[:2]
+                lower_name = fname.lower()
+                
+                parsed_items = 0
+                
+                if magic2 == b'\x1f\x8b':  # gzip magic
+                    log.info(f"🗜️ Processing .gz file: {fname}")
+                    try:
+                        with gzip.GzipFile(fileobj=io.BytesIO(file_data)) as gz_file:
+                            xml_data = gz_file.read()
+                            parsed_items = await process_xml_to_json(xml_data, shop_str, local_json_dir, fname)
+                    except Exception as gz_err:
+                        log.error(f"❌ Error processing .gz file {fname}: {gz_err}")
+                        
+                elif magic2 == b'PK':  # zip magic
+                    log.info(f"📦 Processing .zip file: {fname}")
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(file_data), "r") as zip_ref:
+                            for zip_info in zip_ref.infolist():
+                                if zip_info.filename.endswith((".xml", ".json")):
+                                    with zip_ref.open(zip_info) as file:
+                                        xml_data = file.read()
+                                        parsed_items += await process_xml_to_json(xml_data, shop_str, local_json_dir, zip_info.filename)
+                    except Exception as zip_err:
+                        log.error(f"❌ Error processing .zip file {fname}: {zip_err}")
+                        
+                else:
+                    # Try plain XML fallback
+                    if lower_name.endswith('.xml') or file_data.strip().startswith(b'<'):
+                        log.info(f"📄 Processing plain XML file: {fname}")
+                        try:
+                            parsed_items = await process_xml_to_json(file_data, shop_str, local_json_dir, fname)
+                        except Exception as xml_err:
+                            log.error(f"❌ Error processing XML file {fname}: {xml_err}")
+                    else:
+                        log.warning(f"⚠️ Unsupported file type for: {fname} (magic={magic2!r})")
+                
+                items_parsed += parsed_items
+                counts["zips"] += 1
+                counts["xmls"] += 1
+                counts["rows"] += parsed_items
+                
+                log.info(f"✅ Processed {fname}: {parsed_items} items parsed")
+                        
+            except Exception as e:
+                log.error(f"❌ Error processing {url}: {e}")
+                continue
+        
+        # Final summary for this retailer
+        log.info(f"✅ Downloaded {files_downloaded} files for {shop}")
+        log.info(f"🧩 Parsed {items_parsed} items into JSON")
+        log.info(f"☁️ Uploaded to GCS bucket {BUCKET_NAME}")
+        
+    except Exception as e:
+        log.error(f"❌ Failed to process {shop}: {e}")
+        import traceback
+        log.error(f"Stack trace: {traceback.format_exc()}")
+        raise
+    
+    finally:
+        # Always cleanup browser resources
+        try:
+            if context:
+                await context.close()
+                log.debug(f"🧹 Closed browser context for {shop}")
+        except Exception as e:
+            log.warning(f"Failed to close context for {shop}: {e}")
+        
+        try:
+            if browser:
+                await browser.close()
+                log.debug(f"🧹 Closed browser for {shop}")
+        except Exception as e:
+            log.warning(f"Failed to close browser for {shop}: {e}")
+        
+        try:
+            if playwright_instance:
+                await playwright_instance.stop()
+                log.debug(f"🧹 Stopped Playwright for {shop}")
+        except Exception as e:
+            log.warning(f"Failed to stop Playwright for {shop}: {e}")
+
 async def process_xml_to_json(xml_data: bytes, shop_str: str, local_json_dir: Path, filename: str) -> int:
     """Process XML data and convert to JSON with defined schema."""
     try:
@@ -846,13 +1133,25 @@ async def main_async(target_shop: str | None = None):
         else:
             log.warning(f"Requested shop not found: {target_shop}")
     else:
+        log.info(f"🚀 Starting to process {len(links)} retailers...")
+        
         for shop, hub in links.items():
+            # Skip ignored retailers
+            if "וולט" in shop or "סטופ מרקט" in shop:
+                log.info(f"⏭️ Skipping {shop}")
+                continue
+                
             if hub in visited:
+                log.info(f"⏭️ Already processed {shop} (duplicate URL)")
                 continue
             visited.add(hub)
+            
             try:
-                log.info(f"🔄 Starting crawl for shop: {shop}")
-                await crawl_single_shop_async(shop, hub, counts)
+                log.info(f"🏪 Processing {shop} – {hub}")
+                
+                # Process this retailer with detailed logging
+                await crawl_single_shop_async_robust(shop, hub, counts)
+                
                 log.info(f"✅ Successfully completed crawl for shop: {shop}")
                 
                 # Force garbage collection after each shop to free memory
@@ -860,7 +1159,7 @@ async def main_async(target_shop: str | None = None):
                 log.debug(f"🧹 Garbage collection completed for {shop}")
                 
             except Exception as e:
-                log.error(f"❌ Failed to crawl shop {shop}: {e}")
+                log.error(f"❌ Failed processing {shop}: {e}")
                 import traceback
                 log.error(f"Stack trace for {shop}: {traceback.format_exc()}")
                 # Continue with next shop instead of stopping
