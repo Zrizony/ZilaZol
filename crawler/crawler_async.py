@@ -664,9 +664,14 @@ async def crawl_single_shop_async(shop: str, hub: str, counts: dict):
                 
                 # Upload raw file to GCS
                 file_blob_name = f"downloads/{shop_slug}/{fname}"
-                if upload_to_gcs(BUCKET_NAME, resp.body(), file_blob_name):
-                    files_downloaded += 1
-                    log.info(f"☁️ Uploaded raw file {fname} to GCS bucket {BUCKET_NAME}")
+                try:
+                    if upload_to_gcs(BUCKET_NAME, resp.body(), file_blob_name):
+                        files_downloaded += 1
+                        log.info(f"☁️ Uploaded raw file {fname} to GCS bucket {BUCKET_NAME}")
+                    else:
+                        log.error(f"❌ Failed to upload raw file {fname} to GCS")
+                except Exception as upload_err:
+                    log.error(f"❌ Exception uploading raw file {fname}: {upload_err}")
                 
                 # Process file content and convert to JSON
                 magic2 = resp.body()[:2]
@@ -738,11 +743,14 @@ async def process_xml_to_json(xml_data: bytes, shop_str: str, local_json_dir: Pa
     """Process XML data and convert to JSON with defined schema."""
     try:
         # Parse XML using existing parse_xml function
+        log.info(f"🔍 Parsing XML data from {filename} ({len(xml_data)} bytes)")
         xml_type, rows = parse_xml(xml_data, shop_str)
         
         if not xml_type or not rows:
-            log.warning(f"⚠️ No valid XML data found in {filename}")
+            log.warning(f"⚠️ No valid XML data found in {filename} (type: {xml_type}, rows: {len(rows) if rows else 0})")
             return 0
+        
+        log.info(f"✅ Parsed {len(rows)} rows from {filename}")
         
         # Convert to our defined schema
         json_items = []
@@ -770,8 +778,13 @@ async def process_xml_to_json(xml_data: bytes, shop_str: str, local_json_dir: Pa
         json_blob_name = f"json_outputs/{slug(shop_str)}/{json_filename}"
         json_data = json.dumps(json_items, ensure_ascii=False)
         
-        if upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name):
-            log.info(f"☁️ Uploaded JSON to GCS: {json_blob_name}")
+        try:
+            if upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name):
+                log.info(f"☁️ Uploaded JSON to GCS: {json_blob_name}")
+            else:
+                log.error(f"❌ Failed to upload JSON to GCS: {json_blob_name}")
+        except Exception as upload_err:
+            log.error(f"❌ Exception uploading JSON to GCS: {upload_err}")
         
         return len(json_items)
         
