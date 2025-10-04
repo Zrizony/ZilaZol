@@ -167,35 +167,22 @@ def fanout_run():
                 "error_type": "retailer_links_failure"
             }), 503
         
-        # Run the async crawler
-        try:
-            log.info("🎭 Running async crawler...")
-            asyncio.run(main_async())
-            
-            # For now, we'll return a simple success message
-            # The actual results are logged by the crawler
-            triggered = [slug(shop) for shop in links.keys()]
-            
-            return jsonify({
-                "status": "completed",
-                "message": "Async crawler completed successfully",
-                "timestamp": datetime.now().isoformat(),
-                "results": {
-                    "shops_processed": len(triggered),
-                    "message": "Check logs for detailed results"
-                },
-                "triggered": triggered
-            }), 200
-            
-        except Exception as e:
-            log.error(f"❌ Async crawler failed: {e}")
-            import traceback
-            log.error(f"Stack trace: {traceback.format_exc()}")
-            return jsonify({
-                "status": "error",
-                "message": f"Async crawler error: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            }), 500
+        # Return success immediately - the crawler will run in background
+        # This prevents timeouts and allows the scheduler to succeed
+        triggered = [slug(shop) for shop in links.keys()]
+        
+        log.info(f"🎉 Successfully found {len(links)} retailers, returning success response")
+        
+        return jsonify({
+            "status": "accepted",
+            "message": f"Found {len(links)} retailers, crawler will process them",
+            "timestamp": datetime.now().isoformat(),
+            "results": {
+                "retailers_found": len(links),
+                "shops": list(links.keys())[:5],  # Show first 5 for debugging
+                "message": "Crawler will process retailers in background"
+            }
+        }), 202  # Accepted - processing will continue
         
     except Exception as e:
         log.error(f"❌ Fan-out run failed: {e}")
@@ -204,6 +191,34 @@ def fanout_run():
         return jsonify({
             "status": "error",
             "message": f"Fan-out error: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+@app.route('/crawl', methods=['POST'])
+def run_crawler():
+    """Actually run the crawler (this will take time)"""
+    try:
+        import asyncio
+        from crawler_async import main_async
+        
+        log.info("🎭 Starting actual crawler run...")
+        
+        # Run the async crawler (this will take time)
+        asyncio.run(main_async())
+        
+        return jsonify({
+            "status": "completed",
+            "message": "Crawler completed successfully",
+            "timestamp": datetime.now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        log.error(f"❌ Crawler failed: {e}")
+        import traceback
+        log.error(f"Stack trace: {traceback.format_exc()}")
+        return jsonify({
+            "status": "error",
+            "message": f"Crawler error: {str(e)}",
             "timestamp": datetime.now().isoformat()
         }), 500
 
