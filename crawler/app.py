@@ -6,9 +6,13 @@ Flask app wrapper for the cloud crawler with Google Cloud Storage integration
 
 from flask import Flask, request, jsonify
 import os
+import logging
 from datetime import datetime
 
 app = Flask(__name__)
+
+# Set up logging
+log = logging.getLogger(__name__)
 
 @app.route('/', methods=['GET'])
 def health_check():
@@ -117,31 +121,83 @@ def test_endpoint():
 def fanout_run():
     """Fan-out runner: triggers per-shop crawls and returns immediately (202).
 
-    This endpoint discovers retailers and sends internal HTTP requests to /crawl?shop=...
-    It does not wait for completion to keep Scheduler within a short deadline.
+    This endpoint discovers retailers and runs crawls directly instead of making HTTP requests.
+    This avoids self-referencing HTTP calls that can cause issues in Cloud Run.
     """
     try:
-        from crawler_cloud import retailer_links, slug
-        import requests as http
-        base_url = os.environ.get('BASE_URL') or request.host_url.rstrip('/')
-
-        links = retailer_links()
+        from crawler_cloud import retailer_links, slug, _crawl_single_shop
+        import threading
+        import time
+        
+        log.info("🚀 Starting fan-out crawler run...")
+        
+        # Get retailer links
+        try:
+            links = retailer_links()
+            log.info(f"📋 Found {len(links)} retailers to crawl")
+        except Exception as e:
+            log.error(f"❌ Failed to get retailer links: {e}")
+            return jsonify({
+                "status": "error",
+                "message": f"Failed to get retailer links: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }), 500
+        
+        # Initialize counters
+        counts = {"zips": 0, "xmls": 0, "rows": 0}
+        visited = set()
         triggered = []
-        for shop in links.keys():
+        failed_shops = []
+        
+        # Process each shop
+        for shop, hub in links.items():
+            if hub in visited:
+                continue
+            visited.add(hub)
+            
             shop_slug = slug(shop)
+            triggered.append(shop_slug)
+            
             try:
-                http.post(f"{base_url}/crawl", json={"shop": shop_slug}, timeout=5)
-                triggered.append(shop_slug)
-            except Exception:
-                pass
-
+                log.info(f"🔄 Starting crawl for shop: {shop}")
+                
+                # Run the crawl directly (not via HTTP request)
+                _crawl_single_shop(shop, hub, counts)
+                
+                log.info(f"✅ Completed crawl for shop: {shop}")
+                
+            except Exception as e:
+                log.error(f"❌ Failed to crawl shop {shop}: {e}")
+                failed_shops.append({"shop": shop_slug, "error": str(e)})
+                continue
+        
+        # Log final results
+        log.info(f"🎯 Fan-out crawl completed:")
+        log.info(f"   • Shops processed: {len(triggered)}")
+        log.info(f"   • Shops failed: {len(failed_shops)}")
+        log.info(f"   • Files downloaded: {counts['zips']}")
+        log.info(f"   • XMLs parsed: {counts['xmls']}")
+        log.info(f"   • Rows extracted: {counts['rows']}")
+        
         return jsonify({
-            "status": "accepted",
-            "message": "Fan-out started",
+            "status": "completed",
+            "message": "Fan-out crawler completed successfully",
+            "timestamp": datetime.now().isoformat(),
+            "results": {
+                "shops_processed": len(triggered),
+                "shops_failed": len(failed_shops),
+                "files_downloaded": counts["zips"],
+                "xmls_parsed": counts["xmls"],
+                "rows_extracted": counts["rows"]
+            },
             "triggered": triggered,
-            "timestamp": datetime.now().isoformat()
-        }), 202
+            "failed_shops": failed_shops
+        }), 200
+        
     except Exception as e:
+        log.error(f"❌ Fan-out run failed: {e}")
+        import traceback
+        log.error(f"Stack trace: {traceback.format_exc()}")
         return jsonify({
             "status": "error",
             "message": f"Fan-out error: {str(e)}",
