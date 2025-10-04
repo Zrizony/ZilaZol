@@ -128,6 +128,7 @@ def fanout_run():
         from crawler_cloud import retailer_links, slug, _crawl_single_shop
         import threading
         import time
+        import asyncio
         
         log.info("🚀 Starting fan-out crawler run...")
         
@@ -160,7 +161,7 @@ def fanout_run():
         triggered = []
         failed_shops = []
         
-        # Process each shop
+        # Process each shop sequentially to avoid asyncio conflicts
         for shop, hub in links.items():
             if hub in visited:
                 continue
