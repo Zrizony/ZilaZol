@@ -119,80 +119,17 @@ def test_endpoint():
 
 @app.route('/run', methods=['POST'])
 def fanout_run():
-    """Fan-out runner: triggers per-shop crawls and returns immediately (202).
+    """Fan-out runner: discovers retailers and crawls them completely."""
+    import asyncio
+    from crawler_async import run_fanout_async  # new single entry point
 
-    This endpoint discovers retailers and runs crawls directly instead of making HTTP requests.
-    This avoids self-referencing HTTP calls that can cause issues in Cloud Run.
-    """
     try:
-        import asyncio
-        from crawler_async import main_async, retailer_links_async
-        from crawler_cloud import slug
-        
-        log.info("🚀 Starting fan-out crawler run (async)...")
-        
-        # Get retailer links with fallback
-        try:
-            links = asyncio.run(retailer_links_async())
-            if not links:
-                log.warning("⚠️ No retailer links found, trying cached/fallback approach...")
-                
-                # No fallback links available - the government website is the source of truth
-                log.error("❌ No retailer links found from government website")
-                log.info("💡 This usually means:")
-                log.info("   • Government website structure has changed")
-                log.info("   • Website is temporarily unavailable") 
-                log.info("   • Network connectivity issues")
-                log.info("   • Playwright selectors need updating")
-                
-                return jsonify({
-                    "status": "error",
-                    "message": "Cannot find retailer links from government website",
-                    "details": "The government website may have changed structure or be temporarily unavailable",
-                    "timestamp": datetime.now().isoformat(),
-                    "suggestion": "Check government website manually and update selectors if needed"
-                }), 503
-            else:
-                log.info(f"📋 Found {len(links)} retailers to crawl")
-        except Exception as e:
-            log.error(f"❌ Failed to get retailer links: {e}")
-            import traceback
-            log.error(f"Stack trace: {traceback.format_exc()}")
-            
-            return jsonify({
-                "status": "error",
-                "message": f"Failed to get retailer links: {str(e)}",
-                "details": "Exception occurred while trying to fetch retailer links from government website",
-                "timestamp": datetime.now().isoformat(),
-                "error_type": "retailer_links_failure"
-            }), 503
-        
-        # Return success immediately - the crawler will run in background
-        # This prevents timeouts and allows the scheduler to succeed
-        triggered = [slug(shop) for shop in links.keys()]
-        
-        log.info(f"🎉 Successfully found {len(links)} retailers, returning success response")
-        
-        return jsonify({
-            "status": "accepted",
-            "message": f"Found {len(links)} retailers, crawler will process them",
-            "timestamp": datetime.now().isoformat(),
-            "results": {
-                "retailers_found": len(links),
-                "shops": list(links.keys())[:5],  # Show first 5 for debugging
-                "message": "Crawler will process retailers in background"
-            }
-        }), 202  # Accepted - processing will continue
-        
+        res = asyncio.run(run_fanout_async())
+        # res is a dict summary we'll return to Cloud Scheduler
+        return (res, 200)
     except Exception as e:
-        log.error(f"❌ Fan-out run failed: {e}")
-        import traceback
-        log.error(f"Stack trace: {traceback.format_exc()}")
-        return jsonify({
-            "status": "error",
-            "message": f"Fan-out error: {str(e)}",
-            "timestamp": datetime.now().isoformat()
-        }), 500
+        log.exception("Run failed")
+        return ({"ok": False, "error": str(e)}, 500)
 
 @app.route('/crawl-full', methods=['POST'])
 def run_crawler_full():

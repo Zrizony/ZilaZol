@@ -857,3 +857,234 @@ async def main_async(target_shop: str | None = None):
 
     log.info("Downloaded %d files, parsed %d XMLs, extracted %d rows",
              counts["zips"], counts["xmls"], counts["rows"])
+
+# ───────────── NEW FANOUT WORKFLOW ─────────────────────────────────────────
+import asyncio
+import contextlib
+from typing import Dict, List
+
+IGNORED_RETAILERS = {
+    "וולט אופריישנס סרוויסס ישראל בע\"מ",
+    "סטופ מרקט בע\"מ",
+}
+
+# Map host → credential key from CREDS
+DOMAIN_TO_CREDKEY = {
+    "prices.quik.co.il": "yohananof",
+    "kingstore.binaprojects.com": "doralon",
+    "url.publishedprices.co.il": "RamiLevi",   # same login host used by several retailers
+}
+
+# Where to store raw files locally inside container (Cloud Run ephemeral disk)
+RAW_DIR = Path("/tmp/raw")
+SS_DIR = Path("/tmp/screenshots")
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+SS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---- Helper to persist to GCS (you already use this pattern elsewhere)
+def upload_to_gcs(local_path: Path, gcs_uri: str):
+    from google.cloud import storage
+    bkt_name, _, blob_path = gcs_uri.replace("gs://", "").partition("/")
+    client = storage.Client()
+    bucket = client.bucket(bkt_name)
+    blob = bucket.blob(blob_path)
+    blob.upload_from_filename(str(local_path))
+    log.info(f"☁️ Uploaded -> {gcs_uri}")
+
+# ---- Playwright context/bootstrap for Cloud Run
+async def new_browser():
+    # Cloud Run compatible flags
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+        ],
+    )
+    context = await browser.new_context(locale="he-IL")
+    page = await context.new_page()
+    return pw, browser, context, page
+
+# ---- Core processor for each retailer
+async def process_retailer(retailer_name: str, url: str) -> dict:
+    # Skip ignored retailers
+    for bad in IGNORED_RETAILERS:
+        if bad in retailer_name:
+            log.info(f"⏭️ Skipping {retailer_name}")
+            return {"retailer": retailer_name, "skipped": True}
+
+    # open a fresh context per retailer to avoid cookie reuse (as requested)
+    pw, browser, ctx, page = await new_browser()
+    summary = {"retailer": retailer_name, "files": 0, "screenshots": 0}
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        # If this retailer uses the shared login host, perform login:
+        from urllib.parse import urlparse
+        host = urlparse(page.url).netloc
+        credkey = DOMAIN_TO_CREDKEY.get(host)
+        creds = CREDS.get(credkey or "", {})
+
+        if "publishedprices.co.il" in host:
+            # go to the login form directly if we are on /login
+            if not page.url.endswith("/login"):
+                await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded")
+            # Username only or username+password
+            await page.fill('input[name="username"]', creds.get("username",""))
+            with contextlib.suppress(Exception):
+                if creds.get("password"):
+                    await page.fill('input[name="password"]', creds["password"])
+            await page.click("button[type=submit], input[type=submit]")
+            await page.wait_for_load_state("networkidle", timeout=45000)
+            # Guaranteed landing page for files
+            await page.goto("https://url.publishedprices.co.il/file", wait_until="networkidle", timeout=60000)
+
+        # Take screenshot after login/redirect
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ss_path = SS_DIR / f"{retailer_name.replace(' ','_')}_{ts}.png"
+        await page.screenshot(path=str(ss_path), full_page=True)
+        summary["screenshots"] += 1
+
+        # Collect download links (anchors and "Download(…)" onclick buttons)
+        anchors = await page.locator("a[href$='.zip'], a[href$='.gz'], a[href$='.xml']").all()
+        buttons = await page.locator("button[onclick*='Download'], a[onclick*='Download']").all()
+
+        hrefs: List[str] = []
+        for el in anchors:
+            with contextlib.suppress(Exception):
+                h = await el.get_attribute("href")
+                if h: hrefs.append(h)
+        for el in buttons:
+            with contextlib.suppress(Exception):
+                oc = await el.get_attribute("onclick")
+                # naive extraction of the file path inside Download('...')
+                m = re.search(r"Download\(['\"]([^'\"]+)['\"]\)", oc or "")
+                if m:
+                    hrefs.append(m.group(1))
+
+        # Normalize to absolute URLs
+        from urllib.parse import urljoin
+        hrefs = [urljoin(page.url, h) for h in hrefs]
+        hrefs = list(dict.fromkeys(hrefs))  # dedup, keep order
+
+        log.info(f"📥 {retailer_name}: {len(hrefs)} file links found")
+
+        # Reuse cookies from Playwright to download with requests
+        # (safer/faster for bigger files)
+        cookies = await ctx.cookies()
+        jar = requests.cookies.RequestsCookieJar()
+        for c in cookies:
+            jar.set(c["name"], c["value"], domain=c.get("domain"), path=c.get("path","/"))
+
+        session = requests.Session()
+        session.cookies = jar
+        session.headers.update({"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"})
+
+        # Download each file and immediately push to GCS and parse to JSONL
+        bucket = os.environ.get("PRICES_BUCKET", "zilazol-prices")
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        for h in hrefs:
+            with contextlib.suppress(Exception):
+                r = session.get(h, timeout=90, allow_redirects=True)
+                r.raise_for_status()
+                # local save
+                fname = h.split("/")[-1].split("?")[0]
+                local = RAW_DIR / fname
+                local.write_bytes(r.content)
+                summary["files"] += 1
+
+                # upload raw
+                gcs_raw = f"gs://{bucket}/raw/{retailer_name}/{today}/{fname}"
+                upload_to_gcs(local, gcs_raw)
+
+                # parse → JSONL and upload (best-effort)
+                jsonl = RAW_DIR / (fname + ".jsonl")
+                rows = _to_jsonl(local, jsonl)
+                if rows:
+                    gcs_norm = f"gs://{bucket}/json_out/{retailer_name}/{today}/{jsonl.name}"
+                    upload_to_gcs(jsonl, gcs_norm)
+
+        return summary
+    finally:
+        await ctx.close()
+        await browser.close()
+        await pw.stop()
+
+def _to_jsonl(compressed: Path, out_path: Path) -> int:
+    """
+    Very tolerant parser for .gz/.zip/.xml (Price* / Promo*).
+    Returns number of rows written.
+    """
+    def iter_xml_bytes(b: bytes):
+        # .xml, .gz(xml), .zip(xml) — return raw xml bytes
+        if compressed.suffix.lower() == ".gz":
+            b = gzip.decompress(b)
+        elif compressed.suffix.lower() == ".zip":
+            with zipfile.ZipFile(io.BytesIO(b)) as zf:
+                # first xml in archive
+                for n in zf.namelist():
+                    if n.lower().endswith(".xml"):
+                        with zf.open(n) as f:
+                            b = f.read()
+                            break
+        return b
+
+    try:
+        data = compressed.read_bytes()
+        xml_bytes = iter_xml_bytes(data)
+        if not xml_bytes:
+            return 0
+
+        # extremely permissive parsing
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(xml_bytes)
+
+        # Simplified schema visitor
+        rows = []
+        for item in root.iter():
+            tag = item.tag.lower()
+            if tag.endswith("item") or tag.endswith("product"):
+                obj = {c.tag: (c.text or "").strip() for c in item}
+                if obj:
+                    rows.append(obj)
+
+        if not rows:
+            return 0
+
+        with out_path.open("w", encoding="utf-8") as w:
+            for r in rows:
+                w.write(json.dumps(r, ensure_ascii=False) + "\n")
+        log.info(f"→ {out_path.name} ({len(rows)} rows)")
+        return len(rows)
+    except Exception as e:
+        log.warning(f"Parse failed for {compressed.name}: {e}")
+        return 0
+
+# ---- Orchestrator with bounded concurrency
+async def run_fanout_async() -> dict:
+    """
+    1) Discover retailers on gov page
+    2) Process each retailer (login → screenshot → download → JSONL → GCS)
+    """
+    links = await retailer_links_async()
+    if not links:
+        return {"ok": False, "error": "no retailers found"}
+
+    sem = asyncio.Semaphore(int(os.environ.get("CRAWL_CONCURRENCY", "3")))
+    results = []
+
+    async def _job(name, href):
+        async with sem:
+            with contextlib.suppress(Exception):
+                res = await process_retailer(name, href)
+                results.append(res)
+
+    await asyncio.gather(*[_job(n, h) for n, h in links.items()])
+
+    total_files = sum(r.get("files",0) for r in results)
+    total_ss = sum(r.get("screenshots",0) for r in results)
+    log.info(f"✅ DONE: {len(results)} retailers, {total_files} files, {total_ss} screenshots")
+    return {"ok": True, "retailers": len(results), "files": total_files, "screenshots": total_ss}
