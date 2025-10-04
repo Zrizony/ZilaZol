@@ -517,7 +517,16 @@ async def zip_links_async(hub: str, creds: dict | None, shop: str = "retailer") 
     
     # Copy cookies from browser context to API context for authentication
     cookies = await page.context.cookies()
-    await api_context.add_cookies(cookies)
+    # Convert cookies to the new format for async API
+    cookie_list = []
+    for cookie in cookies:
+        cookie_list.append({
+            "name": cookie.get("name", ""),
+            "value": cookie.get("value", ""),
+            "domain": cookie.get("domain", urlparse(hub).netloc),
+            "path": cookie.get("path", "/")
+        })
+    await api_context.add_cookies(cookie_list)
     
     # Return unique URLs and the authenticated API context for downloads
     unique_urls = list(dict.fromkeys(u for u in captured if ZIP_RX.search(u)))
@@ -530,104 +539,135 @@ async def crawl_single_shop_async(shop: str, hub: str, counts: dict):
     log.info(f"[{shop}] hub scan")
     creds = creds_for(shop)
     shop_str = str(shop) if shop else "retailer"
+    api_context = None
     
-    # Use async Playwright-based authentication
-    files, api_context = await zip_links_async(hub, creds, shop_str)
-    if not files:
-        log.warning("No files for %s", shop)
-        await api_context.dispose()
-        return
+    try:
+        # Use async Playwright-based authentication
+        files, api_context = await zip_links_async(hub, creds, shop_str)
+        if not files:
+            log.warning("No files for %s", shop)
+            return
 
-    for url in files:
-        try:
-            # Use the authenticated API context to download files
-            resp = await api_context.fetch(url, timeout=120_000)
-            if resp.status != 200:
-                log.warning(f"Download failed for {url}: {resp.status}")
-                continue
-            fname = Path(urlparse(url).path).name
-            
-            # Upload compressed file to cloud storage
-            file_blob_name = f"downloads/{slug(shop_str)}/{fname}"
-            if upload_to_gcs(BUCKET_NAME, resp.body(), file_blob_name):
-                counts["zips"] += 1
-
-            # Process file content based on magic bytes (robust against wrong extensions)
-            magic2 = resp.body()[:2]
-            lower_name = fname.lower()
-
-            if magic2 == b'\x1f\x8b':  # gzip magic
-                # Handle .gz files (single file compression)
-                log.info(f"Processing .gz file: {fname}")
-                try:
-                    with gzip.GzipFile(fileobj=io.BytesIO(resp.body())) as gz_file:
-                        xml_data = gz_file.read()
-                        xml_type, rows = parse_xml(xml_data, shop_str)
-                        if xml_type:
-                            counts["xmls"] += 1
-                            counts["rows"] += len(rows)
-                            
-                            # Upload JSON data to cloud storage
-                            base_fname = fname[:-3] if fname.endswith('.gz') else fname
-                            json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{base_fname}.jsonl"
-                            json_data = json.dumps(rows, ensure_ascii=False)
-                            upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
-                        else:
-                            log.warning("Unknown XML type for %s", fname)
-                except Exception as gz_err:
-                    log.error(f"Error processing .gz file {fname}: {gz_err}")
-                    
-            elif magic2 == b'PK':  # zip magic
-                # Handle .zip files (archive with multiple files)
-                log.info(f"Processing .zip file: {fname}")
-                with zipfile.ZipFile(io.BytesIO(resp.body()), "r") as zip_ref:
-                    for zip_info in zip_ref.infolist():
-                        if zip_info.filename.endswith((".xml", ".json")):
-                            with zip_ref.open(zip_info) as file:
-                                xml_data = file.read()
-                                xml_type, rows = parse_xml(xml_data, shop_str)
-                                if xml_type:
-                                    counts["xmls"] += 1
-                                    counts["rows"] += len(rows)
-                                    
-                                    # Upload JSON data to cloud storage
-                                    json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{zip_info.filename}.jsonl"
-                                    json_data = json.dumps(rows, ensure_ascii=False)
-                                    upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
-                                else:
-                                    log.warning("Unknown XML type for %s", zip_info.filename)
-            else:
-                # Try plain XML fallback
-                if lower_name.endswith('.xml') or resp.body().strip().startswith(b'<'):
-                    log.info(f"Processing plain XML file: {fname}")
-                    xml_type, rows = parse_xml(resp.body(), shop_str)
-                    if xml_type:
-                        counts["xmls"] += 1
-                        counts["rows"] += len(rows)
-                        json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{fname}.jsonl"
-                        json_data = json.dumps(rows, ensure_ascii=False)
-                        upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
-                    else:
-                        log.warning("Unknown XML type for %s", fname)
-                else:
-                    log.warning(f"Unsupported file type or unknown magic for: {fname} (magic={magic2!r})")
+        log.info(f"📁 Found {len(files)} files to download for {shop}")
+        
+        for i, url in enumerate(files, 1):
+            try:
+                log.info(f"📥 Downloading file {i}/{len(files)} for {shop}: {url}")
+                # Use the authenticated API context to download files
+                resp = await api_context.fetch(url, timeout=120_000)
+                if resp.status != 200:
+                    log.warning(f"Download failed for {url}: {resp.status}")
+                    continue
+                fname = Path(urlparse(url).path).name
                 
-        except Exception as e:
-            log.error("Error processing %s: %s", url, e)
+                # Upload compressed file to cloud storage
+                file_blob_name = f"downloads/{slug(shop_str)}/{fname}"
+                if upload_to_gcs(BUCKET_NAME, resp.body(), file_blob_name):
+                    counts["zips"] += 1
+                    log.info(f"✅ Uploaded {fname} to GCS")
+
+                # Process file content based on magic bytes (robust against wrong extensions)
+                magic2 = resp.body()[:2]
+                lower_name = fname.lower()
+
+                if magic2 == b'\x1f\x8b':  # gzip magic
+                    # Handle .gz files (single file compression)
+                    log.info(f"Processing .gz file: {fname}")
+                    try:
+                        with gzip.GzipFile(fileobj=io.BytesIO(resp.body())) as gz_file:
+                            xml_data = gz_file.read()
+                            xml_type, rows = parse_xml(xml_data, shop_str)
+                            if xml_type:
+                                counts["xmls"] += 1
+                                counts["rows"] += len(rows)
+                                
+                                # Upload JSON data to cloud storage
+                                base_fname = fname[:-3] if fname.endswith('.gz') else fname
+                                json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{base_fname}.jsonl"
+                                json_data = json.dumps(rows, ensure_ascii=False)
+                                upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
+                            else:
+                                log.warning("Unknown XML type for %s", fname)
+                    except Exception as gz_err:
+                        log.error(f"Error processing .gz file {fname}: {gz_err}")
+                        
+                elif magic2 == b'PK':  # zip magic
+                    # Handle .zip files (archive with multiple files)
+                    log.info(f"Processing .zip file: {fname}")
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(resp.body()), "r") as zip_ref:
+                            for zip_info in zip_ref.infolist():
+                                if zip_info.filename.endswith((".xml", ".json")):
+                                    with zip_ref.open(zip_info) as file:
+                                        xml_data = file.read()
+                                        xml_type, rows = parse_xml(xml_data, shop_str)
+                                        if xml_type:
+                                            counts["xmls"] += 1
+                                            counts["rows"] += len(rows)
+                                            
+                                            # Upload JSON data to cloud storage
+                                            json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{zip_info.filename}.jsonl"
+                                            json_data = json.dumps(rows, ensure_ascii=False)
+                                            upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
+                                        else:
+                                            log.warning("Unknown XML type for %s", zip_info.filename)
+                    except Exception as zip_err:
+                        log.error(f"Error processing .zip file {fname}: {zip_err}")
+                        
+                else:
+                    # Try plain XML fallback
+                    if lower_name.endswith('.xml') or resp.body().strip().startswith(b'<'):
+                        log.info(f"Processing plain XML file: {fname}")
+                        try:
+                            xml_type, rows = parse_xml(resp.body(), shop_str)
+                            if xml_type:
+                                counts["xmls"] += 1
+                                counts["rows"] += len(rows)
+                                json_blob_name = f"json_outputs/{slug(shop_str)}/{slug(shop_str)}_{fname}.jsonl"
+                                json_data = json.dumps(rows, ensure_ascii=False)
+                                upload_to_gcs(BUCKET_NAME, json_data.encode('utf-8'), json_blob_name)
+                            else:
+                                log.warning("Unknown XML type for %s", fname)
+                        except Exception as xml_err:
+                            log.error(f"Error processing XML file {fname}: {xml_err}")
+                    else:
+                        log.warning(f"Unsupported file type or unknown magic for: {fname} (magic={magic2!r})")
+                        
+            except Exception as e:
+                log.error("Error processing %s: %s", url, e)
+                import traceback
+                log.error(f"Stack trace: {traceback.format_exc()}")
     
-    # Dispose of the API context when done
-    await api_context.dispose()
+    finally:
+        # Always dispose of the API context to free memory
+        if api_context:
+            try:
+                await api_context.dispose()
+                log.debug(f"✅ Disposed API context for {shop}")
+            except Exception as e:
+                log.warning(f"Failed to dispose API context for {shop}: {e}")
 
 # ───────────── ASYNC MAIN FUNCTION ─────────────────────────────────────────
 async def main_async(target_shop: str | None = None):
-    """Async version of the main crawler function"""
+    """Async version of the main crawler function with memory optimization"""
+    import gc
+    
     # Check Playwright browser installation
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as pw:
             # This will fail if browsers aren't installed
             browser = await pw.chromium.launch(
-                args=["--ignore-certificate-errors", "--no-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--ignore-certificate-errors", 
+                    "--no-sandbox", 
+                    "--disable-dev-shm-usage",
+                    "--memory-pressure-off",  # Disable memory pressure detection
+                    "--max_old_space_size=4096",  # Limit memory usage
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding"
+                ],
                 headless=True
             )
             await browser.close()
@@ -668,9 +708,18 @@ async def main_async(target_shop: str | None = None):
                 continue
             visited.add(hub)
             try:
+                log.info(f"🔄 Starting crawl for shop: {shop}")
                 await crawl_single_shop_async(shop, hub, counts)
+                log.info(f"✅ Successfully completed crawl for shop: {shop}")
+                
+                # Force garbage collection after each shop to free memory
+                gc.collect()
+                log.debug(f"🧹 Garbage collection completed for {shop}")
+                
             except Exception as e:
-                log.error(f"Failed to crawl shop {shop}: {e}")
+                log.error(f"❌ Failed to crawl shop {shop}: {e}")
+                import traceback
+                log.error(f"Stack trace for {shop}: {traceback.format_exc()}")
                 # Continue with next shop instead of stopping
                 continue
 

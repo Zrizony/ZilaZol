@@ -1,11 +1,13 @@
 # Use small, secure Python image
 FROM python:3.11-slim AS app
 
-# Avoid Python cache files, enable unbuffered logging
+# Avoid Python cache files, enable unbuffered logging, optimize memory
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONHASHSEED=0 \
+    MALLOC_ARENA_MAX=2
 
 # Install system dependencies required for Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \

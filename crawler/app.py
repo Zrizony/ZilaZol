@@ -194,9 +194,9 @@ def fanout_run():
             "timestamp": datetime.now().isoformat()
         }), 500
 
-@app.route('/crawl', methods=['POST'])
-def run_crawler():
-    """Actually run the crawler (this will take time)"""
+@app.route('/crawl-full', methods=['POST'])
+def run_crawler_full():
+    """Actually run the full crawler (this will take time)"""
     try:
         import asyncio
         from crawler_async import main_async
