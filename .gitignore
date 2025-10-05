@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Playwright
+/ms-playwright/
+playwright-report/
+test-results/
+
+# Logs & temp
+*.log
+*.json
+*.csv
+*.tmp
+*.bak
+logs/
+debug/
+screenshots/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Cloud / credentials
+*.env
+credentials.json
+service-account.json
+
+# Output / data folders
+downloads/
+json_out/
+output/
+test/
