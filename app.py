@@ -3,31 +3,46 @@ from __future__ import annotations
 import os
 import asyncio
 from flask import Flask, jsonify
-from crawler.discovery import discover_retailers
+from crawler.gov_il import fetch_retailers
 from crawler.core import run_all
 from crawler import logger
 
-GOV_URL = "https://www.gov.il/he/pages/cpfta_prices_regulations"
+# Config
+GOV_URL = os.getenv("GOV_URL", "https://www.gov.il/he/pages/cpfta_prices_regulations")
+PORT = int(os.getenv("PORT", 8080))
 
 app = Flask(__name__)
 
+
 @app.get("/health")
 def health():
+    """Basic health check."""
     return jsonify({"ok": True}), 200
 
+
 @app.post("/run")
-def trigger_run():
+@app.get("/run")
+def run():
+    """Trigger the full async crawling pipeline."""
     try:
-        retailers = asyncio.run(discover_retailers(GOV_URL))
+        retailers = fetch_retailers(GOV_URL)
+        count = len(retailers)
+        app.logger.info(f"Discovered {count} retailers from gov.il")
+
         if not retailers:
-            return jsonify({"error": "no_retailers_discovered"}), 500
+            return jsonify({"status": "no_retailers_found"}), 200
+
+        # Run crawler
         results = asyncio.run(run_all(retailers))
-        return jsonify({"count": len(results), "results": results}), 200
+        return (
+            jsonify({"status": "done", "retailers_count": count, "results": results}),
+            200,
+        )
+
     except Exception as e:
-        logger.exception("run_failed")
+        app.logger.exception("Run failed")
         return jsonify({"error": str(e)}), 500
 
+
 if __name__ == "__main__":
-    # Local dev only; Cloud Run uses Gunicorn CMD
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)

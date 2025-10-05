@@ -1,48 +1,26 @@
-# Python
+# Ignore Python cache and build junk
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.egg-info/
-.venv/
-venv/
-env/
-
-# Git
-.git
-.gitignore
-
-# Playwright local cache
-/ms-playwright/
-playwright-report/
-test-results/
-
-# Logs & temp
 *.log
-*.json
-*.csv
-*.tmp
-*.bak
-logs/
-debug/
-screenshots/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-
-# Build artifacts
-Dockerfile
-*.tar
+*.gz
 *.zip
 
-# Data / Output
+# Ignore local dirs
 downloads/
+screenshots/
 json_out/
-output/
-test/
+
+# Ignore git & local configs
+.git
+.gitignore
+.env
+venv/
+.envrc
+.idea/
+.vscode/
+
+# Ignore old files you don’t want deployed
+crawler_cloud.py
+crawler_async.py
