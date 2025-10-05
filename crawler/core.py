@@ -24,7 +24,9 @@ from . import logger
 # Settings / Constants
 # ----------------------------
 
-PRICES_BUCKET = os.getenv("PRICES_BUCKET") or os.getenv("BUCKET_NAME")  # either env works
+PRICES_BUCKET = os.getenv("PRICES_BUCKET") or os.getenv(
+    "BUCKET_NAME"
+)  # either env works
 LOCAL_DOWNLOAD_DIR = os.getenv("LOCAL_DOWNLOAD_DIR", "downloads")
 LOCAL_JSON_DIR = os.getenv("LOCAL_JSON_DIR", "json_out")
 SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
@@ -70,6 +72,7 @@ PUBLISHED_PRICES_HOST = "url.publishedprices.co.il"
 # Data Models
 # ----------------------------
 
+
 @dataclass
 class RetailerResult:
     display_name: str
@@ -90,14 +93,18 @@ class RetailerResult:
 # Helpers
 # ----------------------------
 
+
 def ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
 
 def safe_name(s: str) -> str:
     return re.sub(r"[^\w\-.]+", "_", s).strip("_")[:120]
 
+
 def md5_bytes(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
+
 
 def parse_datetime_from_filename(name: str) -> Optional[datetime]:
     # Looks for YYYYMMDDHHMM or 202506200531, or 2025-06-20-000020 type tokens
@@ -105,17 +112,26 @@ def parse_datetime_from_filename(name: str) -> Optional[datetime]:
     if not m:
         return None
     try:
-        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                        int(m.group(4)), int(m.group(5)), tzinfo=timezone.utc)
+        return datetime(
+            int(m.group(1)),
+            int(m.group(2)),
+            int(m.group(3)),
+            int(m.group(4)),
+            int(m.group(5)),
+            tzinfo=timezone.utc,
+        )
     except Exception:
         return None
+
 
 def ensure_dirs(*paths: str):
     for p in paths:
         os.makedirs(p, exist_ok=True)
 
+
 def should_ignore(display_name: str) -> bool:
     return any(bad in (display_name or "") for bad in IGNORE_DISPLAY_SUBSTRINGS)
+
 
 def get_cred_for(display_name: str) -> Optional[Dict[str, str]]:
     for k, credkey in SHOP_TO_CREDKEY.items():
@@ -123,9 +139,11 @@ def get_cred_for(display_name: str) -> Optional[Dict[str, str]]:
             return CREDS.get(credkey)
     return None
 
+
 # ----------------------------
 # GCS
 # ----------------------------
+
 
 def get_bucket() -> Optional[storage.Bucket]:
     if not PRICES_BUCKET:
@@ -133,9 +151,16 @@ def get_bucket() -> Optional[storage.Bucket]:
     client = storage.Client()
     return client.bucket(PRICES_BUCKET)
 
-async def upload_to_gcs(bucket: storage.Bucket, blob_path: str, data: bytes, content_type: str = "application/octet-stream"):
+
+async def upload_to_gcs(
+    bucket: storage.Bucket,
+    blob_path: str,
+    data: bytes,
+    content_type: str = "application/octet-stream",
+):
     blob = bucket.blob(blob_path)
     blob.upload_from_string(data, content_type=content_type)
+
 
 # ----------------------------
 # XML → JSONL parser (best effort across schemas)
@@ -143,12 +168,14 @@ async def upload_to_gcs(bucket: storage.Bucket, blob_path: str, data: bytes, con
 
 from lxml import etree
 
+
 def _first_text(elem, *paths) -> Optional[str]:
     for p in paths:
         r = elem.find(p)
         if r is not None and (t := (r.text or "").strip()):
             return t
     return None
+
 
 def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
     rows: List[dict] = []
@@ -164,47 +191,73 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
 
     for it in items:
         # Try a range of common tag names
-        name = _first_text(it, "ItemName", "ManufacturerItemDescription", "Description", "itemname", "name")
-        barcode = _first_text(it, "ItemCode", "Barcode", "ItemBarcode", "itemcode", "barcode", "Code")
+        name = _first_text(
+            it,
+            "ItemName",
+            "ManufacturerItemDescription",
+            "Description",
+            "itemname",
+            "name",
+        )
+        barcode = _first_text(
+            it, "ItemCode", "Barcode", "ItemBarcode", "itemcode", "barcode", "Code"
+        )
         price = _first_text(it, "ItemPrice", "Price", "price")
-        date = _first_text(it, "PriceUpdateDate", "UpdateDate", "LastUpdateDate", "date")
+        date = _first_text(
+            it, "PriceUpdateDate", "UpdateDate", "LastUpdateDate", "date"
+        )
 
         # Skip useless rows
         if not (barcode or name or price):
             continue
 
-        rows.append({
-            "name": name,
-            "barcode": barcode,
-            "date": date,
-            "price": price,
-            "company": company,
-        })
+        rows.append(
+            {
+                "name": name,
+                "barcode": barcode,
+                "date": date,
+                "price": price,
+                "company": company,
+            }
+        )
     return rows
+
 
 # ----------------------------
 # Playwright Actions
 # ----------------------------
 
+
 async def new_context(pw):
-    browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+    browser = await pw.chromium.launch(
+        headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+    )
     ctx = await browser.new_context(locale="he-IL")
     return browser, ctx
+
 
 async def screenshot_after_login(page: Page, display_name: str):
     ensure_dirs(SCREENSHOTS_DIR)
     fname = f"{safe_name(display_name)}_{ts()}.png"
     await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
 
+
 @retry(stop=stop_after_attempt(MAX_LOGIN_RETRIES), wait=wait_fixed(2))
-async def login_publishedprices(page: Page, base_url: str, username: str, password: Optional[str]):
+async def login_publishedprices(
+    page: Page, base_url: str, username: str, password: Optional[str]
+):
     # Force to /login first
     if "/login" not in base_url.lower():
         base_url = f"https://{PUBLISHED_PRICES_HOST}/login"
     await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
 
     # Fill username
-    for sel in ["input[name='username']", "#username", "input[name='Email']", "input[type='email']"]:
+    for sel in [
+        "input[name='username']",
+        "#username",
+        "input[name='Email']",
+        "input[type='email']",
+    ]:
         if await page.locator(sel).count():
             await page.fill(sel, username)
             break
@@ -218,7 +271,12 @@ async def login_publishedprices(page: Page, base_url: str, username: str, passwo
             break
 
     # Submit
-    for sel in ["button[type='submit']", "input[type='submit']", "button:has-text('כניסה')", "button:has-text('Login')"]:
+    for sel in [
+        "button[type='submit']",
+        "input[type='submit']",
+        "button:has-text('כניסה')",
+        "button:has-text('Login')",
+    ]:
         if await page.locator(sel).count():
             await page.click(sel)
             break
@@ -227,19 +285,28 @@ async def login_publishedprices(page: Page, base_url: str, username: str, passwo
     try:
         await page.wait_for_url("**/file", timeout=20000)
     except Exception:
-        await page.goto("https://url.publishedprices.co.il/file", wait_until="load", timeout=25000)
+        await page.goto(
+            "https://url.publishedprices.co.il/file", wait_until="load", timeout=25000
+        )
 
     await page.wait_for_load_state("networkidle", timeout=10000)
 
+
 async def collect_download_links(page: Page) -> List[str]:
-    hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(a => a.getAttribute('href'))")
+    hrefs = await page.eval_on_selector_all(
+        "a[href]", "els => els.map(a => a.getAttribute('href'))"
+    )
     hrefs = [h for h in (hrefs or []) if h]
     out = []
     for h in hrefs:
         h_abs = await page.evaluate("u => new URL(u, location.href).href", h)
-        if h_abs.lower().endswith((".xml", ".gz", ".zip")) or "download" in h_abs.lower():
+        if (
+            h_abs.lower().endswith((".xml", ".gz", ".zip"))
+            or "download" in h_abs.lower()
+        ):
             out.append(h_abs)
     return sorted(set(out))
+
 
 async def fetch_url_bytes(page: Page, url: str) -> bytes:
     # Try clicking if same page link; otherwise just fetch via page request
@@ -248,9 +315,11 @@ async def fetch_url_bytes(page: Page, url: str) -> bytes:
         raise RuntimeError(f"download_failed status={resp.status}")
     return await resp.body()
 
+
 # ----------------------------
 # Main crawl per retailer
 # ----------------------------
+
 
 async def crawl_one(display_name: str, portal_url: str) -> RetailerResult:
     result = RetailerResult(display_name=display_name, portal_url=portal_url, errors=[])
@@ -280,24 +349,32 @@ async def crawl_one(display_name: str, portal_url: str) -> RetailerResult:
                 if not cred:
                     result.errors.append("no_credentials_mapped")
                     logger.warning("No creds for %s", display_name)
-                    await ctx.close(); await browser.close()
+                    await ctx.close()
+                    await browser.close()
                     return result
 
-                await login_publishedprices(page, portal_url, cred.get("username"), cred.get("password"))
+                await login_publishedprices(
+                    page, portal_url, cred.get("username"), cred.get("password")
+                )
                 await screenshot_after_login(page, display_name)
                 links = await collect_download_links(page)
 
             else:
                 # Generic: go to portal and collect .xml/.gz/.zip links
-                await page.goto(portal_url, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(
+                    portal_url, wait_until="domcontentloaded", timeout=60000
+                )
                 await page.wait_for_load_state("networkidle", timeout=10000)
-                await screenshot_after_login(page, display_name)  # snapshot even if no login
+                await screenshot_after_login(
+                    page, display_name
+                )  # snapshot even if no login
                 links = await collect_download_links(page)
 
             if not links:
                 result.errors.append("no_download_links_found")
                 logger.warning("No download links for %s", display_name)
-                await ctx.close(); await browser.close()
+                await ctx.close()
+                await browser.close()
                 return result
 
             for href in links:
@@ -308,7 +385,10 @@ async def crawl_one(display_name: str, portal_url: str) -> RetailerResult:
                     continue
 
                 # Local save
-                fname = safe_name(os.path.basename(urlparse(href).path)) or f"file_{md5_bytes(data)}"
+                fname = (
+                    safe_name(os.path.basename(urlparse(href).path))
+                    or f"file_{md5_bytes(data)}"
+                )
                 local_path = os.path.join(retailer_dir, fname)
                 async with aiofiles.open(local_path, "wb") as f:
                     await f.write(data)
@@ -326,7 +406,9 @@ async def crawl_one(display_name: str, portal_url: str) -> RetailerResult:
                 result.files_downloaded += 1
 
                 # Parse → JSONL (only XML content)
-                await _maybe_parse_to_jsonl(display_name, retailer_json_dir, fname, data)
+                await _maybe_parse_to_jsonl(
+                    display_name, retailer_json_dir, fname, data
+                )
 
         except Exception as e:
             result.errors.append(f"fatal:{e}")
@@ -336,7 +418,10 @@ async def crawl_one(display_name: str, portal_url: str) -> RetailerResult:
 
     return result
 
-async def _maybe_parse_to_jsonl(display_name: str, json_dir: str, fname: str, data: bytes):
+
+async def _maybe_parse_to_jsonl(
+    display_name: str, json_dir: str, fname: str, data: bytes
+):
     # Detect content → xml bytes
     xml_bytes: Optional[bytes] = None
     lf = fname.lower()
@@ -360,7 +445,10 @@ async def _maybe_parse_to_jsonl(display_name: str, json_dir: str, fname: str, da
     if xml_bytes:
         await _write_jsonl_for_xml(display_name, json_dir, fname, xml_bytes)
 
-async def _write_jsonl_for_xml(display_name: str, json_dir: str, source_name: str, xml_bytes: bytes):
+
+async def _write_jsonl_for_xml(
+    display_name: str, json_dir: str, source_name: str, xml_bytes: bytes
+):
     # Choose output name based on source timestamp; if newer, replace
     base = os.path.splitext(os.path.basename(source_name))[0]
     out_name = f"{base}.jsonl"
@@ -370,7 +458,9 @@ async def _write_jsonl_for_xml(display_name: str, json_dir: str, source_name: st
     new_dt = parse_datetime_from_filename(source_name) or datetime.now(timezone.utc)
     if os.path.exists(out_path):
         # quick stamp compare via filename; if equal, overwrite, else keep the latest
-        existing_dt = parse_datetime_from_filename(os.path.basename(out_path)) or datetime.fromtimestamp(os.path.getmtime(out_path), tz=timezone.utc)
+        existing_dt = parse_datetime_from_filename(
+            os.path.basename(out_path)
+        ) or datetime.fromtimestamp(os.path.getmtime(out_path), tz=timezone.utc)
         if existing_dt and new_dt and new_dt <= existing_dt:
             # Existing is same/newer → skip
             return
@@ -385,9 +475,11 @@ async def _write_jsonl_for_xml(display_name: str, json_dir: str, source_name: st
         for r in rows:
             await f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
+
 # ----------------------------
 # Orchestrator
 # ----------------------------
+
 
 async def run_all(retailers: List[Tuple[str, str]]) -> List[dict]:
     """Run all retailers concurrently; input is [(display_name, portal_url)]."""
