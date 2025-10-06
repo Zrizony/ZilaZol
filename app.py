@@ -41,7 +41,8 @@ def run():
 
     except Exception as e:
         app.logger.exception("Run failed")
-        return jsonify({"error": str(e)}), 500
+        # Respond 200 to Cloud Scheduler to prevent retries
+        return jsonify({"status": "error", "error": str(e)}), 200
 
 
 if __name__ == "__main__":
