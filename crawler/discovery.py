@@ -2,59 +2,106 @@
 from __future__ import annotations
 import asyncio
 from typing import List, Tuple
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from . import logger
 
-BUTTON_TEXTS = ("לצפייה במחירים", "צפייה במחירים", "מחיר")
+GOV_URL = "https://www.gov.il/he/pages/cpfta_prices_regulations"
 
-async def discover_retailers(gov_url: str) -> List[Tuple[str, str]]:
-    """Return [(display_name, href)] for each 'לצפייה במחירים' row on gov.il page."""
-    links: set[tuple[str, str]] = set()
+TEXT_VIEW_PRICES = "לצפייה במחירים"  # anchor text on the button/link
+
+
+async def _collect_with_playwright(debug: bool = False) -> List[Tuple[str, str]]:
+    results: List[Tuple[str, str]] = []
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = await browser.new_context(locale="he-IL")
+        browser = await pw.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        ctx = await browser.new_context(
+            locale="he-IL",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
         page = await ctx.new_page()
-        await page.goto(gov_url, wait_until="domcontentloaded", timeout=90000)
 
-        # Try table-first
-        rows = await page.query_selector_all("table tr")
-        for tr in rows:
-            a = await tr.query_selector("a[href]")
-            if not a:
-                continue
-            text = (await a.inner_text()).strip()
-            if not any(b in text for b in BUTTON_TEXTS):
-                continue
-            href = await a.get_attribute("href") or ""
-            if href.startswith("/"):
-                # Make absolute
-                href = await page.evaluate("u => new URL(u, location.href).href", href)
-            if not href.startswith("http"):
-                continue
+        try:
+            await page.goto(GOV_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # retailer name from first cell if present
-            tds = await tr.query_selector_all("td")
-            display = (await tds[0].inner_text()).strip() if tds else text
-            links.add((display, href))
+            # If there’s a cookies/consent banner, try to accept it
+            for sel in [
+                "button:has-text('מאשר')",
+                "button:has-text('מסכים')",
+                "button:has-text('קבל הכל')",
+                "[role='button']:has-text('מאשר')",
+            ]:
+                if await page.locator(sel).count():
+                    try:
+                        await page.click(sel, timeout=2000)
+                        break
+                    except Exception:
+                        pass
 
-        # Fallback: scan all anchors
-        if not links:
-            anchors = await page.eval_on_selector_all(
-                "a[href]",
-                "els => els.map(a => ({text: a.textContent?.trim()||'', href: a.getAttribute('href')}))"
-            )
-            for r in anchors:
-                t = r.get("text", "")
-                href = r.get("href", "") or ""
-                if any(b in t for b in BUTTON_TEXTS):
-                    if href.startswith("/"):
-                        href = await page.evaluate("u => new URL(u, location.href).href", href)
-                    if href.startswith("http"):
-                        links.add((t, href))
+            # Give the page time to render; then wait for any link with the target text
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
 
-        await ctx.close()
-        await browser.close()
+            # Many gov pages are built with React/Angular; the table might render late.
+            # We wait for any anchor that contains the Hebrew text for "View prices".
+            try:
+                await page.wait_for_selector(
+                    f"a:has-text('{TEXT_VIEW_PRICES}')", timeout=20000
+                )
+            except PWTimeout:
+                if debug:
+                    html = await page.content()
+                    logger.error(
+                        "Gov page rendered but no anchor found; HTML len=%s", len(html)
+                    )
+                return results  # empty
 
-    out = list(links)
-    logger.info("discovered_retailers_count=%d", len(out))
-    return out
+            anchors = page.locator(f"a:has-text('{TEXT_VIEW_PRICES}')")
+            count = await anchors.count()
+            if count == 0:
+                if debug:
+                    html = await page.content()
+                    logger.error("No anchors matched; HTML len=%s", len(html))
+                return results
+
+            # Extract retailer name from the same row/cell; href from the anchor
+            for i in range(count):
+                a = anchors.nth(i)
+                href = await a.get_attribute("href")
+                if not href:
+                    continue
+
+                # Try to grab some text near the anchor (whole row text is often easiest)
+                row = a.locator("xpath=ancestor::tr[1]")
+                retail_text = (
+                    (await row.inner_text()).strip()
+                    if await row.count()
+                    else (await a.inner_text()).strip()
+                )
+
+                # Clean retailer display name a bit (remove the button text)
+                name = retail_text.replace(TEXT_VIEW_PRICES, "").strip()
+                if not name:
+                    name = "לא מזוהה"  # fallback Hebrew: “unidentified”
+
+                results.append((name, href))
+
+            return results
+
+        finally:
+            await ctx.close()
+            await browser.close()
+
+
+def discover_retailers(debug: bool = False) -> List[Tuple[str, str]]:
+    """
+    Synchronous wrapper the rest of the app can call.
+    Returns: [(display_name, portal_url), ...]
+    """
+    return asyncio.run(_collect_with_playwright(debug=debug))
