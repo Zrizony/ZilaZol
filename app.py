@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import asyncio
 from flask import Flask, jsonify, request
-from crawler.gov_il import fetch_retailers_with_fallback as fetch_retailers
+from crawler.gov_il import fetch_retailers
 from crawler.gov_il import discovery_diagnostics
 from crawler.core import run_all
 
