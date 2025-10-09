@@ -7,6 +7,7 @@ from flask import Flask, jsonify, request
 from crawler.discovery import discover_retailers
 from crawler.core import run_all
 from crawler import logger
+from crawler.gov_il import fetch_retailers
 
 app = Flask(__name__)
 
@@ -22,15 +23,18 @@ def version():
 
 
 @app.get("/retailers")
-def retailers_view():
+def retailers():
     debug = request.args.get("debug") == "1"
-    retailers = discover_retailers(debug=debug)
-    logger.info("discovered_retailers_count=%s", len(retailers))
-    # Return 200 even if empty so Cloud Scheduler doesn't mark it as failure
-    return (
-        jsonify({"count": len(retailers), "sample": retailers[:5], "debug": debug}),
-        200,
-    )
+    try:
+        retailers = fetch_retailers()  # uses the patched gov_il.py
+        app.logger.info(f"discovered_retailers_count={len(retailers)}")
+        return (
+            jsonify({"count": len(retailers), "sample": retailers[:5], "debug": debug}),
+            200,
+        )
+    except Exception as e:
+        app.logger.exception("retailers_discovery_failed")
+        return jsonify({"count": 0, "error": str(e)}), 200
 
 
 @app.route("/run", methods=["POST", "GET"])
