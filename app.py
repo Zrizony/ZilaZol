@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 import asyncio
 from flask import Flask, jsonify, request
-from crawler.gov_il import fetch_retailers
+from crawler.gov_il import fetch_retailers_with_fallback as fetch_retailers
+from crawler.gov_il import discovery_diagnostics
 from crawler.core import run_all
 
 app = Flask(__name__)
@@ -26,6 +27,19 @@ def version():
         ),
         200,
     )
+
+
+@app.get("/retailers")
+def retailers():
+    try:
+        if request.args.get("debug") == "1":
+            info = discovery_diagnostics()
+            return jsonify(info), 200
+        items = fetch_retailers()
+        return jsonify({"count": len(items), "retailers": items}), 200
+    except Exception as e:
+        app.logger.exception("Retailers discovery failed")
+        return jsonify({"status": "error", "error": str(e)}), 200
 
 
 @app.errorhandler(Exception)
