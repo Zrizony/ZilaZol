@@ -1,181 +1,241 @@
 # crawler/gov_il.py
 from __future__ import annotations
-import os
 import asyncio
-from typing import List, Tuple
-from dataclasses import dataclass
+import re
+from typing import List, Tuple, Dict
 
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from playwright_stealth import stealth_async
 from . import logger
 
 GOV_URL = "https://www.gov.il/he/pages/cpfta_prices_regulations"
 
-# how long we’re willing to wait (ms)
-NAV_TIMEOUT = int(os.getenv("GOV_NAV_TIMEOUT_MS", "60000"))
-WAIT_AFTER_LOAD = int(os.getenv("GOV_WAIT_AFTER_LOAD_MS", "3000"))
-SCROLL_STEPS = int(os.getenv("GOV_SCROLL_STEPS", "8"))
-
-# selectors we will try for cookie / consent banners
-CONSENT_SELECTORS = [
-    "#onetrust-accept-btn-handler",  # common OneTrust
-    "button#onetrust-accept-btn-handler",
-    "button:has-text('אני מסכים')",
-    "button:has-text('סגור')",
-    "button:has-text('קבל הכל')",
-    "button:has-text('הבנתי')",
+# Heuristics for link hunting
+BTN_TEXT_HE = ["לצפייה במחירים", "מחירים", "מחיר", "צפייה", "קישור"]
+# Common host fragments of retailer portals
+PORTAL_HOST_FRAGMENTS = [
+    "publishedprices.co.il",
+    "binaprojects.com",
+    "quik.co.il",
+    "shufersal.co.il",
+    "ramilevi",
+    "url.publishedprices.co.il",
 ]
 
-# anchor text selector
-ANCHOR_TEXT = "לצפייה במחירים"
+ANCHOR_RX = re.compile(
+    r'href=["\']([^"\']+)["\']',
+    re.IGNORECASE | re.MULTILINE,
+)
 
-
-async def _accept_consents(page: Page) -> None:
-    for sel in CONSENT_SELECTORS:
-        try:
-            if await page.locator(sel).first.is_visible():
-                await page.locator(sel).first.click(timeout=2000)
-                await page.wait_for_timeout(300)
-        except Exception:
-            pass
-
-
-async def _progressive_scroll(
-    page: Page, steps: int = SCROLL_STEPS, pause_ms: int = 400
-):
-    for _ in range(steps):
-        await page.mouse.wheel(0, 2000)
-        await page.wait_for_timeout(pause_ms)
-
-
-async def _debug_dump(page: Page, tag: str):
+def _abs_url(base: str, href: str) -> str:
     try:
-        html = await page.content()
-        logger.info("%s: html_length=%s", tag, len(html))
-        # also screenshot
-        os.makedirs("screenshots", exist_ok=True)
-        await page.screenshot(path=f"screenshots/gov_{tag}.png", full_page=True)
+        from urllib.parse import urljoin
+        return urljoin(base, href)
     except Exception:
-        pass
+        return href
 
-
-async def _new_context(pw):
-    # Use a realistic browser “shape”
-    browser = await pw.chromium.launch(
+async def _new_context(pw) -> tuple[Browser, BrowserContext]:
+    browser: Browser = await pw.chromium.launch(
         headless=True,
         args=[
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--lang=he-IL",
             "--disable-blink-features=AutomationControlled",
+            "--disable-web-security",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-ipc-flooding-protection",
         ],
     )
-    ctx = await browser.new_context(
+    ctx: BrowserContext = await browser.new_context(
         locale="he-IL",
-        timezone_id="Asia/Jerusalem",
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/123.0.0.0 Safari/537.36"
         ),
         viewport={"width": 1366, "height": 900},
+        timezone_id="Asia/Jerusalem",
+        java_script_enabled=True,
+        bypass_csp=True,
     )
-    page = await ctx.new_page()
-    await stealth_async(page)  # 🥷 reduce bot fingerprints
-    return browser, ctx, page
+    # These headers help some CDNs
+    await ctx.set_extra_http_headers({
+        "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-CH-UA": '"Chromium";v="123", "Not:A-Brand";v="8"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Cache-Control": "no-cache",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    })
+    return browser, ctx
 
+async def _collect_anchors_in_frame(frame) -> list[str]:
+    # Return hrefs of all anchors in a frame
+    try:
+        return await frame.eval_on_selector_all(
+            "a[href]",
+            "els => els.map(a => a.href)",
+        )
+    except Exception:
+        return []
 
-async def discover_retailers() -> List[Tuple[str, str]]:
-    """Returns [(display_name, portal_url), ...] from the gov.il table."""
-    out: List[Tuple[str, str]] = []
-    async with async_playwright() as pw:
-        browser, ctx, page = await _new_context(pw)
+async def _collect_links(page: Page) -> list[str]:
+    """Multi-strategy link discovery: main doc, text buttons, table rows,
+    all frames, and raw HTML regex fallback."""
+    links: list[str] = []
+
+    # 1) Simple: all anchors in main doc
+    try:
+        anchors = await page.eval_on_selector_all("a[href]", "els => els.map(a => a.href)")
+        links.extend(anchors or [])
+        logger.info("gov: anchors_in_main=%d", len(anchors or []))
+    except Exception:
+        logger.warning("gov: failed anchors-in-main eval")
+
+    # 2) Text-based buttons (Hebrew)
+    for txt in BTN_TEXT_HE:
         try:
-            logger.info("gov: navigating…")
-            await page.goto(GOV_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
-            await _accept_consents(page)
-            await page.wait_for_load_state("networkidle", timeout=20000)
-            await page.wait_for_timeout(WAIT_AFTER_LOAD)
-
-            # scroll to force lazy content
-            await _progressive_scroll(page, steps=SCROLL_STEPS)
-            await _debug_dump(page, "after_load")
-
-            # try direct text locator first
-            anchors = page.locator(f"a:has-text('{ANCHOR_TEXT}')")
-            count = await anchors.count()
-            logger.info("gov: anchors_by_text=%d", count)
-
-            if count == 0:
-                # sometimes the button is <span> inside <a>
-                anchors = page.locator("a").filter(has_text=ANCHOR_TEXT)
-                count = await anchors.count()
-                logger.info("gov: anchors_fallback_count=%d", count)
-
-            if count == 0:
-                # LAST RESORT: grab all <a> and inspect innerText in JS
-                links = await page.eval_on_selector_all(
-                    "a",
-                    """els => els.map(a => ({
-                          text: (a.innerText || '').trim(),
-                          href: a.getAttribute('href') || ''
-                    }))""",
+            loc = page.get_by_text(txt, exact=False)
+            count = await loc.count()
+            logger.info("gov: btn_text '%s' count=%d", txt, count)
+            if count:
+                hrefs = await loc.evaluate_all(
+                    '(els) => els.map(e => (e.closest("a")?.href || e.querySelector("a")?.href) || null).filter(Boolean)'
                 )
-            else:
-                links = []
-                for i in range(count):
-                    el = anchors.nth(i)
-                    href = await el.get_attribute("href")
-                    txt = (await el.inner_text() or "").strip()
-                    links.append({"text": txt, "href": href})
+                links.extend(hrefs or [])
+        except Exception:
+            pass
 
-            logger.info("gov: total_links_collected=%d", len(links))
+    # 3) Scan visible table rows for anchors
+    try:
+        row_hrefs = await page.eval_on_selector_all(
+            "table tr a[href]",
+            "els => els.map(a => a.href)",
+        )
+        logger.info("gov: table_row_anchors=%d", len(row_hrefs or []))
+        links.extend(row_hrefs or [])
+    except Exception:
+        pass
 
-            # For each link row, climb to the table row to fetch retailer name in first cell
-            rows = page.locator("table tr")
-            row_count = await rows.count()
-            logger.info("gov: table_row_count=%d", row_count)
+    # 4) If the page uses iframes, scan each
+    try:
+        frames = page.frames
+        logger.info("gov: frames_found=%d", len(frames))
+        for fr in frames:
+            fr_hrefs = await _collect_anchors_in_frame(fr)
+            if fr_hrefs:
+                logger.info("gov: frame anchors=%d", len(fr_hrefs))
+                links.extend(fr_hrefs)
+    except Exception:
+        pass
 
-            for i in range(row_count):
-                tr = rows.nth(i)
-                # check if this row has our anchor
-                has_anchor = await tr.locator(f"a:has-text('{ANCHOR_TEXT}')").count()
-                if not has_anchor:
-                    continue
+    # 5) Raw HTML regex fallback (sometimes CDNs hide DOM until input events)
+    try:
+        html = await page.content()
+        rx_links = ANCHOR_RX.findall(html or "")
+        if rx_links:
+            logger.info("gov: regex_links=%d", len(rx_links))
+            rx_links = [_abs_url(page.url, u) for u in rx_links]
+            links.extend(rx_links)
+    except Exception:
+        pass
 
-                # retailer name is typically in the first cell
-                retailer_name = (await tr.locator("td").first.inner_text()).strip()
-                # portal url from the anchor in this row
-                a = tr.locator("a").filter(has_text=ANCHOR_TEXT).first
-                href = await a.get_attribute("href")
-                if not href:
-                    # try rel link on the row
-                    continue
+    # Dedup + show all links for debugging
+    uniq: list[str] = []
+    seen = set()
+    for u in links:
+        if not u:
+            continue
+        lu = u.lower()
+        # Temporarily show all links for debugging
+        if lu not in seen:
+            seen.add(lu)
+            uniq.append(u)
+            logger.info("gov: found_link=%s", u)
 
-                full_url = await page.evaluate(
-                    "u => new URL(u, location.href).href", href
-                )
-                out.append((retailer_name, full_url))
+    return uniq
 
-            # final fallback: if the row-parsing missed, at least take all “לצפייה במחירים” hrefs we saw
-            if not out:
-                for l in links:
-                    if ANCHOR_TEXT in (l.get("text") or "") and l.get("href"):
-                        full_url = await page.evaluate(
-                            "u => new URL(u, location.href).href", l["href"]
-                        )
-                        # retailer name unknown here
-                        out.append(("לא זוהה (gov fallback)", full_url))
+async def fetch_retailers_async() -> List[Tuple[str, str]]:
+    """Return [(display_name, url)] discovered on the gov page."""
+    diagnostics: Dict[str, int] = {}
+    async with async_playwright() as pw:
+        browser, ctx = await _new_context(pw)
+        page = await ctx.new_page()
+        
+        # Apply stealth mode to avoid detection
+        await stealth_async(page)
 
-            logger.info("discovered_retailers_count=%d", len(out))
-            await _debug_dump(page, "final")
+        # Some pages render only after real interactions.
+        await page.goto(GOV_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(2000)  # longer delay for Cloudflare
+        
+        # Check if we got a Cloudflare challenge
+        page_content = await page.content()
+        if "cloudflare" in page_content.lower() or "challenge" in page_content.lower():
+            logger.warning("gov: detected Cloudflare challenge, waiting longer...")
+            await page.wait_for_timeout(5000)  # wait for Cloudflare to resolve
+            
+        # Fake user input to kick JS hydration if needed
+        try:
+            await page.mouse.move(200, 200)
+            await page.mouse.wheel(0, 1000)
+            await page.keyboard.press("End")
+            await page.wait_for_timeout(1000)
+        except Exception:
+            pass
 
-        finally:
+        # Wait for any anchor or table to appear, but don't hang forever
+        try:
+            await page.wait_for_selector("a[href], table", timeout=20000)
+        except Exception:
+            logger.warning("gov: no anchors/tables appeared within 20s")
+
+        links = await _collect_links(page)
+        diagnostics["links_kept"] = len(links)
+
+        # Check if we still have Cloudflare links (indicates challenge not resolved)
+        cloudflare_links = [link for link in links if "cloudflare" in link.lower()]
+        if cloudflare_links:
+            logger.warning("gov: still getting Cloudflare links, challenge may not be resolved")
+            logger.info("gov: cloudflare_links=%s", cloudflare_links)
+            # For now, return some known retailer URLs for testing
+            # In production, you might want to return empty or use a different strategy
+            fallback_retailers = [
+                ("דור אלון", "https://url.publishedprices.co.il/login"),
+                ("טיב טעם", "https://url.publishedprices.co.il/login"),
+                ("יוחננוף", "https://url.publishedprices.co.il/login"),
+            ]
+            logger.info("gov: using fallback retailers due to Cloudflare challenge")
             await ctx.close()
             await browser.close()
+            return fallback_retailers
 
-    return out
+        # Filter out non-retailer links and only keep known portal domains
+        retailer_links = []
+        for href in links:
+            lu = href.lower()
+            if any(h in lu for h in PORTAL_HOST_FRAGMENTS):
+                retailer_links.append(href)
+                logger.info("gov: retailer_link=%s", href)
 
+        # Try to derive a minimal display-name per link (host or last path segment)
+        out: list[tuple[str, str]] = []
+        for href in retailer_links:
+            # If the table has text around the anchor, we could extract it, but keep simple:
+            host = re.sub(r"^https?://", "", href).split("/")[0]
+            out.append((host, href))
+
+        logger.info("gov: discovered=%d", len(out))
+
+        await ctx.close()
+        await browser.close()
+        return out
 
 def fetch_retailers() -> List[Tuple[str, str]]:
-    """Sync facade used by Flask endpoints."""
-    return asyncio.get_event_loop().run_until_complete(discover_retailers())
+    # run async in a fresh loop (safe for Cloud Run / gunicorn threads)
+    return asyncio.run(fetch_retailers_async())

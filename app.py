@@ -4,12 +4,13 @@ import os
 import asyncio
 from flask import Flask, jsonify, request
 
-from crawler.discovery import discover_retailers
+from crawler.discovery import attach_routes
 from crawler.core import run_all
 from crawler import logger
 from crawler.gov_il import fetch_retailers
 
 app = Flask(__name__)
+attach_routes(app)   # <-- mount /retailers & /retailers_async
 
 
 @app.get("/health")
@@ -22,42 +23,20 @@ def version():
     return jsonify({"revision": os.getenv("K_REVISION", "dev")}), 200
 
 
-@app.get("/retailers")
-def retailers():
-    debug = request.args.get("debug") == "1"
-    try:
-        retailers = fetch_retailers()  # uses the patched gov_il.py
-        app.logger.info(f"discovered_retailers_count={len(retailers)}")
-        return (
-            jsonify({"count": len(retailers), "sample": retailers[:5], "debug": debug}),
-            200,
-        )
-    except Exception as e:
-        app.logger.exception("retailers_discovery_failed")
-        return jsonify({"count": 0, "error": str(e)}), 200
 
 
 @app.route("/run", methods=["POST", "GET"])
 def run():
     try:
-        debug = request.args.get("debug") == "1"
-        retailers = discover_retailers(debug=debug)
+        retailers = fetch_retailers()
         app.logger.info(f"discovered_retailers_count={len(retailers)}")
-
-        # Return 200 regardless, to avoid 5xx in Cloud Scheduler.
         if not retailers:
-            return jsonify({"status": "no_retailers_found", "count": 0}), 200
-
+            return jsonify({"status": "no_retailers_found"}), 200
         results = asyncio.run(run_all(retailers))
-        return (
-            jsonify({"status": "done", "count": len(results), "results": results}),
-            200,
-        )
-
+        return jsonify({"status": "done", "count": len(results), "results": results}), 200
     except Exception as e:
         app.logger.exception("Run failed")
-        # Still return 200 to keep Scheduler happy; details are in logs.
-        return jsonify({"status": "error", "message": str(e)}), 200
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
