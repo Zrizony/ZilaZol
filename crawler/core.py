@@ -209,6 +209,8 @@ async def publishedprices_open_subpath(page, subpath: str):
     direct = f"https://{PUBLISHED_HOST}/file/cdup/{subpath}/"
     try:
         await page.goto(direct, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_timeout(2000)
         return
     except:
         pass
@@ -217,6 +219,7 @@ async def publishedprices_open_subpath(page, subpath: str):
     if await loc.count() > 0:
         await loc.first.click()
         await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_timeout(2000)
 
 async def collect_links_on_page(page) -> list[str]:
     hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(a => a.href)")
@@ -249,6 +252,10 @@ async def publishedprices_adapter(page: Page, source: dict, retailer: dict, reta
         # Login
         await publishedprices_login(f"https://{PUBLISHED_HOST}/login", username, password)
         
+        # Wait for page to fully load after login
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_timeout(2000)
+        
         # Navigate to subfolder if specified
         subpath = source.get("subpath")
         # Special case: Super Yuda needs Yuda subfolder
@@ -257,6 +264,9 @@ async def publishedprices_adapter(page: Page, source: dict, retailer: dict, reta
         if subpath:
             result.subpath = subpath
             await publishedprices_open_subpath(page, subpath)
+            # Wait for subfolder to load
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_timeout(2000)
         
         # Collect download links
         links = await collect_links_on_page(page)
@@ -320,9 +330,11 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
     )
     
     try:
-        # Navigate to page
+        # Navigate to page with proper wait conditions
         await page.goto(source.get("url", ""), wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_load_state("networkidle", timeout=10000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        # Additional wait for dynamic content
+        await page.wait_for_timeout(2000)
         
         # Collect download links
         links = await collect_links_on_page(page)
@@ -386,9 +398,11 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
     )
     
     try:
-        # Navigate to page
+        # Navigate to page with proper wait conditions
         await page.goto(source.get("url", ""), wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_load_state("networkidle", timeout=10000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        # Additional wait for dynamic content
+        await page.wait_for_timeout(2000)
         
         # Collect download links
         links = await collect_links_on_page(page)
@@ -462,24 +476,24 @@ async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
         if lf.endswith(".xml"):
             xml_bytes = data
         elif lf.endswith(".gz"):
-            # Try GZIP first, but if it fails and looks like ZIP, try ZIP
-            try:
-                xml_bytes = gzip.decompress(data)
-            except Exception as gzip_error:
-                # Check if it's actually a ZIP file (starts with PK signature)
-                if data.startswith(b'PK'):
-                    logger.debug(f"File {filename} appears to be ZIP despite .gz extension, trying ZIP decompression")
-                    try:
-                        with zipfile.ZipFile(io.BytesIO(data)) as z:
-                            for n in z.namelist():
-                                if n.lower().endswith(".xml"):
-                                    xml_bytes = z.read(n)
-                                    break
-                    except Exception as zip_error:
-                        logger.warning(f"Failed to parse {filename}: GZIP failed ({gzip_error}), ZIP also failed ({zip_error})")
-                        return
-                else:
-                    logger.warning(f"Failed to parse {filename}: {gzip_error}")
+            # Check if it's actually a ZIP file first (common case)
+            if data.startswith(b'PK'):
+                logger.debug(f"File {filename} appears to be ZIP despite .gz extension, using ZIP decompression")
+                try:
+                    with zipfile.ZipFile(io.BytesIO(data)) as z:
+                        for n in z.namelist():
+                            if n.lower().endswith(".xml"):
+                                xml_bytes = z.read(n)
+                                break
+                except Exception as zip_error:
+                    logger.warning(f"Failed to parse {filename} as ZIP: {zip_error}")
+                    return
+            else:
+                # Try GZIP for genuine .gz files
+                try:
+                    xml_bytes = gzip.decompress(data)
+                except Exception as gzip_error:
+                    logger.warning(f"Failed to parse {filename} as GZIP: {gzip_error}")
                     return
         elif lf.endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(data)) as z:
