@@ -6,16 +6,14 @@ import json
 import os
 import re
 import hashlib
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple, Optional, Set
-from urllib.parse import urlparse, urljoin
+from typing import Dict, List, Optional, Set
+from urllib.parse import urlparse
 
-import aiofiles
 import gzip
 import zipfile
 from playwright.async_api import async_playwright, Page
-from tenacity import retry, stop_after_attempt, wait_fixed
 from google.cloud import storage
 
 from . import logger
@@ -78,8 +76,6 @@ class RetailerResult:
 # Helpers
 # ----------------------------
 
-def ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 def safe_name(s: str) -> str:
     return re.sub(r"[^\w\-.]+", "_", s).strip("_")[:120]
@@ -87,21 +83,6 @@ def safe_name(s: str) -> str:
 def md5_bytes(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
 
-def parse_datetime_from_filename(name: str) -> Optional[datetime]:
-    m = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})", name)
-    if not m:
-        return None
-    try:
-        return datetime(
-            int(m.group(1)),
-            int(m.group(2)),
-            int(m.group(3)),
-            int(m.group(4)),
-            int(m.group(5)),
-            tzinfo=timezone.utc,
-        )
-    except Exception:
-        return None
 
 def ensure_dirs(*paths: str):
     for p in paths:
