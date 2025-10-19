@@ -20,6 +20,29 @@ from google.cloud import storage
 from . import logger
 
 # ----------------------------
+# Data Classes
+# ----------------------------
+
+@dataclass
+class RetailerResult:
+    retailer_id: str
+    source_url: str
+    errors: List[str]
+    adapter: str
+    links_found: int = 0
+    files_downloaded: int = 0
+    skipped_dupes: int = 0
+    xml: int = 0
+    gz: int = 0
+    zips: int = 0
+    subpath: Optional[str] = None
+    
+    def as_dict(self):
+        d = asdict(self)
+        d["ts"] = datetime.now(timezone.utc).isoformat()
+        return d
+
+# ----------------------------
 # Settings / Constants
 # ----------------------------
 
@@ -82,6 +105,24 @@ def safe_name(s: str) -> str:
 
 def md5_bytes(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
+
+def sniff_file_type(data: bytes, fname: str) -> str:
+    """Returns 'xml' | 'gz' | 'zip' | 'unknown'"""
+    lower = fname.lower()
+    if data.startswith(b"\x1f\x8b"):  # gzip
+        return "gz"
+    if data.startswith(b"PK"):        # zip
+        return "zip"
+    if lower.endswith(".xml"):
+        return "xml"
+    if lower.endswith(".gz"):
+        # mislabelled gz that is actually zip
+        if data.startswith(b"PK"):
+            return "zip"
+        return "gz"
+    if lower.endswith(".zip"):
+        return "zip"
+    return "unknown"
 
 
 def ensure_dirs(*paths: str):
@@ -204,26 +245,102 @@ async def publishedprices_login(page, login_url: str, username: str, password: s
     except:
         await page.goto(f"https://{PUBLISHED_HOST}/file", wait_until="domcontentloaded")
 
-async def publishedprices_open_subpath(page, subpath: str):
-    # Direct Cerberus path first
-    direct = f"https://{PUBLISHED_HOST}/file/cdup/{subpath}/"
+async def publishedprices_open_file_home(page: Page):
+    """Force navigate to Cerberus file root after login"""
+    await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(500)  # allow Cloudflare repaint
+    # Try multiple expected selectors; don't fail hard—just log
+    candidates = [
+        "table.dataTable",           # common Cerberus table
+        "table#filelist",            # some skins
+        "div#filemanager",           # wrapper
+        "div.dataTables_wrapper"     # wrapper
+    ]
+    for sel in candidates:
+        if await page.locator(sel).count():
+            return True
+    return False
+
+async def publishedprices_open_subpath(page: Page, subpath: str):
+    """Navigate to subfolder with fallback to clicking"""
+    # Try direct
+    target_url = f"https://url.publishedprices.co.il/file/cdup/{subpath.strip('/')}/"
     try:
-        await page.goto(direct, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await page.wait_for_timeout(2000)
-        return
-    except:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(500)
+    except Exception:
         pass
-    # Fallback: click folder link by text
-    loc = page.locator("table a", has_text=subpath)
-    if await loc.count() > 0:
-        await loc.first.click()
-        await page.wait_for_load_state("networkidle", timeout=20000)
-        await page.wait_for_timeout(2000)
+
+    # If no rows/links present, try clicking the folder in the listing
+    has_table = await page.locator("table.dataTable, table#filelist, div#filemanager, div.dataTables_wrapper").count()
+    if not has_table:
+        await publishedprices_open_file_home(page)
+
+    # Try clicking folder by name
+    for sel in [
+        f"a:has-text('{subpath}')",
+        f"tr:has(td:has-text('{subpath}')) a[href]"
+    ]:
+        if await page.locator(sel).count():
+            await page.click(sel)
+            await page.wait_for_timeout(800)
+            break
+
+async def publishedprices_collect_links(page: Page) -> List[str]:
+    """Robust link collector for publishedprices (Cerberus variants)"""
+    # anchor types we want: explicit file links, 'get' endpoints, anything ending with .xml/.gz/.zip
+    selectors = [
+        "a[download]",
+        "a[href*='/get/']",
+        "a[href*='?get=']",
+        "a[href$='.xml' i]",
+        "a[href$='.gz' i]",
+        "a[href$='.zip' i]",
+        "a[href*='.xml?' i]",
+        "a[href*='.gz?' i]",
+        "a[href*='.zip?' i]",
+    ]
+
+    hrefs = set()
+    for sel in selectors:
+        # gather in batches; the table updates frequently
+        if await page.locator(sel).count():
+            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.getAttribute('href'))")
+            for h in (vals or []):
+                if not h:
+                    continue
+                try:
+                    abs_url = await page.evaluate("u => new URL(u, location.href).href", h)
+                    hrefs.add(abs_url)
+                except Exception:
+                    pass
+
+    return sorted(hrefs)
 
 async def collect_links_on_page(page) -> list[str]:
-    hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(a => a.href)")
-    return [h for h in hrefs or [] if h.lower().endswith(DOWNLOAD_SUFFIXES)]
+    """Collect download links with broader filters for generic sites"""
+    # Expanded selectors for better link discovery
+    selectors = [
+        "a[download]",
+        "a[href*='download']",
+        "a[href*='file']",
+        "a[href$='.xml' i]",
+        "a[href$='.gz' i]",
+        "a[href$='.zip' i]",
+        "a[href*='.xml?' i]",
+        "a[href*='.gz?' i]",
+        "a[href*='.zip?' i]",
+    ]
+    
+    hrefs = set()
+    for sel in selectors:
+        if await page.locator(sel).count():
+            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
+            for h in (vals or []):
+                if h and h.lower().endswith(DOWNLOAD_SUFFIXES):
+                    hrefs.add(h)
+    
+    return sorted(hrefs)
 
 # ----------------------------
 # Adapters
@@ -252,9 +369,8 @@ async def publishedprices_adapter(page: Page, source: dict, retailer: dict, reta
         # Login
         await publishedprices_login(f"https://{PUBLISHED_HOST}/login", username, password)
         
-        # Wait for page to fully load after login
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await page.wait_for_timeout(2000)
+        # Navigate to file home
+        await publishedprices_open_file_home(page)
         
         # Navigate to subfolder if specified
         subpath = source.get("subpath")
@@ -264,12 +380,18 @@ async def publishedprices_adapter(page: Page, source: dict, retailer: dict, reta
         if subpath:
             result.subpath = subpath
             await publishedprices_open_subpath(page, subpath)
-            # Wait for subfolder to load
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            await page.wait_for_timeout(2000)
         
-        # Collect download links
-        links = await collect_links_on_page(page)
+        # Collect download links using robust collector
+        links = await publishedprices_collect_links(page)
+        result.links_found = len(links)
+        
+        # If no links found, take screenshot and log warning
+        if not links:
+            ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+            fname = f"{retailer_id}_publishedprices_no_links_{ts}.png"
+            await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
+            logger.warning(f"[{retailer_id}] No links found at {page.url}. Saved screenshot: {fname}")
+        
         logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=publishedprices links={len(links)}")
         
         # Process each link
@@ -338,6 +460,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         
         # Collect download links
         links = await collect_links_on_page(page)
+        result.links_found = len(links)
         logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=bina links={len(links)}")
         
         # Process each link
@@ -404,8 +527,24 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         # Additional wait for dynamic content
         await page.wait_for_timeout(2000)
         
-        # Collect download links
+        # Collect download links with retry logic
         links = await collect_links_on_page(page)
+        
+        # If no links found, retry with additional wait
+        if not links:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+            await page.wait_for_timeout(800)
+            links = await collect_links_on_page(page)
+        
+        result.links_found = len(links)
+        
+        # If still no links, take screenshot and log
+        if not links:
+            ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+            fname = f"{retailer_id}_generic_no_links_{ts}.png"
+            await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
+            logger.warning(f"[{retailer_id}] No links found at {page.url}. Saved screenshot: {fname}")
+        
         logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=generic links={len(links)}")
         
         # Process each link
@@ -469,38 +608,32 @@ async def fetch_url_bytes(page: Page, url: str) -> bytes:
 async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
     """Parse XML to JSONL and save to GCS"""
     try:
-        # Detect content → xml bytes
+        # Use file-type sniffing instead of trusting extensions
+        ftype = sniff_file_type(data, filename)
         xml_bytes: Optional[bytes] = None
-        lf = filename.lower()
 
-        if lf.endswith(".xml"):
+        if ftype == "xml":
             xml_bytes = data
-        elif lf.endswith(".gz"):
-            # Check if it's actually a ZIP file first (common case)
-            if data.startswith(b'PK'):
-                logger.debug(f"File {filename} appears to be ZIP despite .gz extension, using ZIP decompression")
-                try:
-                    with zipfile.ZipFile(io.BytesIO(data)) as z:
-                        for n in z.namelist():
-                            if n.lower().endswith(".xml"):
-                                xml_bytes = z.read(n)
-                                break
-                except Exception as zip_error:
-                    logger.warning(f"Failed to parse {filename} as ZIP: {zip_error}")
+        elif ftype == "gz":
+            try:
+                xml_bytes = gzip.decompress(data)
+            except Exception:
+                # if gz decompress fails, try treating as zip (just in case)
+                if data.startswith(b"PK"):
+                    ftype = "zip"
+                else:
+                    logger.warning(f"Failed to decompress gz: {filename}")
                     return
-            else:
-                # Try GZIP for genuine .gz files
-                try:
-                    xml_bytes = gzip.decompress(data)
-                except Exception as gzip_error:
-                    logger.warning(f"Failed to parse {filename} as GZIP: {gzip_error}")
-                    return
-        elif lf.endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(data)) as z:
-                for n in z.namelist():
-                    if n.lower().endswith(".xml"):
-                        xml_bytes = z.read(n)
-                        break
+        elif ftype == "zip":
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    for n in z.namelist():
+                        if n.lower().endswith(".xml"):
+                            xml_bytes = z.read(n)
+                            break
+            except Exception:
+                logger.warning(f"Failed to read zip: {filename}")
+                return
 
         if xml_bytes:
             rows = parse_prices_xml(xml_bytes, company=retailer_id)
@@ -542,19 +675,20 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
     # Deduplication sets (per retailer)
     seen_hashes: Set[str] = set()
     seen_names: Set[str] = set()
+    dupe_count = 0
     
     results = []
-    
+
     async with async_playwright() as pw:
         browser, ctx = await new_context(pw)
         page = await ctx.new_page()
-        
+
         try:
             for source in sources:
                 source_url = source.get("url", "")
                 if not source_url:
                     continue
-                
+
                 # Determine adapter based on host/type
                 host = source.get("host", "").lower()
                 adapter_type = "generic"
@@ -576,13 +710,13 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
                 
                 # Log results
                 logger.info(f"retailer={retailer_id} source={source_url} adapter={adapter_type} "
-                          f"links={len(await collect_links_on_page(page))} downloaded={result.files_downloaded} "
+                          f"links={result.links_found} downloaded={result.files_downloaded} "
                           f"skipped_dupe={result.skipped_dupes}")
                 
         finally:
             await ctx.close()
             await browser.close()
-    
+
     return results
 
 # ----------------------------
@@ -591,13 +725,17 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
 
 async def run_all(retailers: List[dict]) -> List[dict]:
     """Run all retailers concurrently"""
+    # Warn if PRICES_BUCKET is missing
+    if not PRICES_BUCKET:
+        logger.warning("PRICES_BUCKET environment variable not set - GCS uploads will be skipped")
+
     tasks = []
     for retailer in retailers:
         if retailer.get("enabled", True):
             tasks.append(crawl_retailer(retailer))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     out: List[dict] = []
     for retailer_results in results:
         if isinstance(retailer_results, Exception):

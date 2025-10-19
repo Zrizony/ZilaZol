@@ -83,7 +83,7 @@
       "id": "wolt",
       "name": "וולט אופריישנס סרוויסס ישראל בע\"מ",
       "url": "https://wm-gateway.wolt.com/isr-prices/public/v1/index.html",
-      "host": "",
+      "host": "wolt.com",
       "enabled": true,
       "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
@@ -92,7 +92,7 @@
       "id": "victorymarket",
       "name": "ויקטורי רשת סופרמרקטים בע\"מ",
       "url": "https://laibcatalog.co.il/",
-      "host": "",
+      "host": "laibcatalog.co.il",
       "enabled": true,
       "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
@@ -101,7 +101,7 @@
       "id": "zolvebegadol",
       "name": "זול ובגדול בע\"מ",
       "url": "https://zolvebegadol.binaprojects.com/Main.aspx",
-      "host": "",
+      "host": "binaprojects.com",
       "enabled": true,
       "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
@@ -110,7 +110,7 @@
       "id": "chokent",
       "name": "ח. כהן סוכנות מזון ומשקאות בע\"מ",
       "url": "https://laibcatalog.co.il/",
-      "host": "",
+      "host": "laibcatalog.co.il",
       "enabled": true,
       "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
@@ -161,7 +161,7 @@
       "id": "nativhachad",
       "name": "נתיב החסד - סופר חסד בע\"מ (כולל ברכל)",
       "url": "http://141.226.203.152/",
-      "host": "",
+      "host": "141.226.203.152",
       "enabled": true,
       "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
