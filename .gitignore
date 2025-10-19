@@ -16,6 +16,8 @@ test-results/
 # Logs & temp
 *.log
 *.json
+!data/retailers_fallback.json
+!data/retailers.json
 *.csv
 *.tmp
 *.bak

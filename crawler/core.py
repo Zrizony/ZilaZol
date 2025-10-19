@@ -8,8 +8,8 @@ import re
 import hashlib
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple, Optional
-from urllib.parse import urlparse
+from typing import Dict, List, Tuple, Optional, Set
+from urllib.parse import urlparse, urljoin
 
 import aiofiles
 import gzip
@@ -24,9 +24,7 @@ from . import logger
 # Settings / Constants
 # ----------------------------
 
-PRICES_BUCKET = os.getenv("PRICES_BUCKET") or os.getenv(
-    "BUCKET_NAME"
-)  # either env works
+PRICES_BUCKET = os.getenv("PRICES_BUCKET") or os.getenv("BUCKET_NAME")
 LOCAL_DOWNLOAD_DIR = os.getenv("LOCAL_DOWNLOAD_DIR", "downloads")
 LOCAL_JSON_DIR = os.getenv("LOCAL_JSON_DIR", "json_out")
 SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
@@ -51,63 +49,45 @@ CREDS: Dict[str, Dict[str, str]] = {
     "SuperCofixApp": {"username": "SuperCofixApp"},
 }
 
-# Map retailer display-name substrings → key in CREDS
-SHOP_TO_CREDKEY: Dict[str, str] = {
-    "דור אלון": "doralon",
-    "טיב טעם": "TivTaam",
-    "יוחננוף": "yohananof",
-    "אושר עד": "osherad",
-    "סאלח דבאח": "SalachD",
-    "פוליצר": "politzer",
-    "פז ": "Paz_bo",
-    "קשת טעמים": "Keshet",
-    "רמי לוי": "RamiLevi",
-    "קופיקס": "SuperCofixApp",
-    "פרשמרקט": "freshmarket",
-}
-
-PUBLISHED_PRICES_HOST = "url.publishedprices.co.il"
+PUBLISHED_HOST = "url.publishedprices.co.il"
+DOWNLOAD_SUFFIXES = (".xml", ".gz", ".zip")
 
 # ----------------------------
 # Data Models
 # ----------------------------
 
-
 @dataclass
 class RetailerResult:
-    display_name: str
-    portal_url: str
+    retailer_id: str
+    source_url: str
     files_downloaded: int = 0
     xml_parsed_rows: int = 0
     zips: int = 0
     gz: int = 0
+    skipped_dupes: int = 0
     errors: List[str] = None
+    adapter: str = "unknown"
+    subpath: Optional[str] = None
 
     def as_dict(self):
         d = asdict(self)
         d["ts"] = datetime.now(timezone.utc).isoformat()
         return d
 
-
 # ----------------------------
 # Helpers
 # ----------------------------
 
-
 def ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
 
 def safe_name(s: str) -> str:
     return re.sub(r"[^\w\-.]+", "_", s).strip("_")[:120]
 
-
 def md5_bytes(b: bytes) -> str:
     return hashlib.md5(b).hexdigest()
 
-
 def parse_datetime_from_filename(name: str) -> Optional[datetime]:
-    # Looks for YYYYMMDDHHMM or 202506200531, or 2025-06-20-000020 type tokens
     m = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})", name)
     if not m:
         return None
@@ -123,34 +103,22 @@ def parse_datetime_from_filename(name: str) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def ensure_dirs(*paths: str):
     for p in paths:
         os.makedirs(p, exist_ok=True)
 
-
 def should_ignore(display_name: str) -> bool:
     return any(bad in (display_name or "") for bad in IGNORE_DISPLAY_SUBSTRINGS)
-
-
-def get_cred_for(display_name: str) -> Optional[Dict[str, str]]:
-    for k, credkey in SHOP_TO_CREDKEY.items():
-        if k in display_name:
-            return CREDS.get(credkey)
-    return None
-
 
 # ----------------------------
 # GCS
 # ----------------------------
-
 
 def get_bucket() -> Optional[storage.Bucket]:
     if not PRICES_BUCKET:
         return None
     client = storage.Client()
     return client.bucket(PRICES_BUCKET)
-
 
 async def upload_to_gcs(
     bucket: storage.Bucket,
@@ -161,13 +129,11 @@ async def upload_to_gcs(
     blob = bucket.blob(blob_path)
     blob.upload_from_string(data, content_type=content_type)
 
-
 # ----------------------------
-# XML → JSONL parser (best effort across schemas)
+# XML → JSONL parser
 # ----------------------------
 
 from lxml import etree
-
 
 def _first_text(elem, *paths) -> Optional[str]:
     for p in paths:
@@ -176,7 +142,6 @@ def _first_text(elem, *paths) -> Optional[str]:
             return t
     return None
 
-
 def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
     rows: List[dict] = []
     try:
@@ -184,13 +149,11 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
     except Exception:
         return rows
 
-    # Common-ish structures: Items/Item or root/Item
     items = root.findall(".//Item")
     if not items:
         items = list(root)
 
     for it in items:
-        # Try a range of common tag names
         name = _first_text(
             it,
             "ItemName",
@@ -207,7 +170,6 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
             it, "PriceUpdateDate", "UpdateDate", "LastUpdateDate", "date"
         )
 
-        # Skip useless rows
         if not (barcode or name or price):
             continue
 
@@ -222,11 +184,9 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
         )
     return rows
 
-
 # ----------------------------
 # Playwright Actions
 # ----------------------------
-
 
 async def new_context(pw):
     browser = await pw.chromium.launch(
@@ -235,263 +195,407 @@ async def new_context(pw):
     ctx = await browser.new_context(locale="he-IL")
     return browser, ctx
 
-
 async def screenshot_after_login(page: Page, display_name: str):
     ensure_dirs(SCREENSHOTS_DIR)
     fname = f"{safe_name(display_name)}_{ts()}.png"
     await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
 
+# ----------------------------
+# PublishedPrices Adapter
+# ----------------------------
 
-@retry(stop=stop_after_attempt(MAX_LOGIN_RETRIES), wait=wait_fixed(2))
-async def login_publishedprices(
-    page: Page, base_url: str, username: str, password: Optional[str]
-):
-    # Force to /login first
-    if "/login" not in base_url.lower():
-        base_url = f"https://{PUBLISHED_PRICES_HOST}/login"
-    await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
-
-    # Fill username
-    for sel in [
-        "input[name='username']",
-        "#username",
-        "input[name='Email']",
-        "input[type='email']",
-    ]:
+async def publishedprices_login(page, login_url: str, username: str, password: str):
+    await page.goto(login_url, wait_until="domcontentloaded", timeout=90000)
+    # Try common selectors; don't fail if password is empty
+    for sel in ["input[name='username']", "#username", "input[type='email']"]:
         if await page.locator(sel).count():
             await page.fill(sel, username)
             break
-
-    # Password optional
-    filled_pw = False
     for sel in ["input[name='password']", "#password", "input[type='password']"]:
-        if await page.locator(sel).count() and password:
+        if password and await page.locator(sel).count():
             await page.fill(sel, password)
-            filled_pw = True
             break
-
-    # Submit
-    for sel in [
-        "button[type='submit']",
-        "input[type='submit']",
-        "button:has-text('כניסה')",
-        "button:has-text('Login')",
-    ]:
+    for sel in ["button[type='submit']", "input[type='submit']",
+                "button:has-text('כניסה')", "button:has-text('Login')"]:
         if await page.locator(sel).count():
             await page.click(sel)
             break
-
-    # Wait for redirect to /file; if not, navigate explicitly
     try:
-        await page.wait_for_url("**/file", timeout=20000)
-    except Exception:
-        await page.goto(
-            "https://url.publishedprices.co.il/file", wait_until="load", timeout=25000
-        )
+        await page.wait_for_url("**/file**", timeout=25000)
+    except:
+        await page.goto(f"https://{PUBLISHED_HOST}/file", wait_until="domcontentloaded")
 
-    await page.wait_for_load_state("networkidle", timeout=10000)
+async def publishedprices_open_subpath(page, subpath: str):
+    # Direct Cerberus path first
+    direct = f"https://{PUBLISHED_HOST}/file/cdup/{subpath}/"
+    try:
+        await page.goto(direct, wait_until="domcontentloaded", timeout=60000)
+        return
+    except:
+        pass
+    # Fallback: click folder link by text
+    loc = page.locator("table a", has_text=subpath)
+    if await loc.count() > 0:
+        await loc.first.click()
+        await page.wait_for_load_state("networkidle", timeout=20000)
 
+async def collect_links_on_page(page) -> list[str]:
+    hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(a => a.href)")
+    return [h for h in hrefs or [] if h.lower().endswith(DOWNLOAD_SUFFIXES)]
 
-async def collect_download_links(page: Page) -> List[str]:
-    hrefs = await page.eval_on_selector_all(
-        "a[href]", "els => els.map(a => a.getAttribute('href'))"
+# ----------------------------
+# Adapters
+# ----------------------------
+
+async def publishedprices_adapter(page: Page, source: dict, retailer: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
+    """PublishedPrices adapter with optional subfolder support"""
+    result = RetailerResult(
+        retailer_id=retailer_id,
+        source_url=source.get("url", ""),
+        errors=[],
+        adapter="publishedprices"
     )
-    hrefs = [h for h in (hrefs or []) if h]
-    out = []
-    for h in hrefs:
-        h_abs = await page.evaluate("u => new URL(u, location.href).href", h)
-        if (
-            h_abs.lower().endswith((".xml", ".gz", ".zip"))
-            or "download" in h_abs.lower()
-        ):
-            out.append(h_abs)
-    return sorted(set(out))
+    
+    # Get credentials from retailer level (authRef/tenantKey) or source level (creds_key)
+    creds_key = source.get("creds_key") or retailer.get("tenantKey")
+    if not creds_key or creds_key not in CREDS:
+        result.errors.append("no_credentials_mapped")
+        return result
+    
+    credentials = CREDS[creds_key]
+    username = credentials.get("username")
+    password = credentials.get("password", "")
+    
+    try:
+        # Login
+        await publishedprices_login(f"https://{PUBLISHED_HOST}/login", username, password)
+        
+        # Navigate to subfolder if specified
+        subpath = source.get("subpath")
+        # Special case: Super Yuda needs Yuda subfolder
+        if not subpath and retailer_id == "superyuda":
+            subpath = "Yuda"
+        if subpath:
+            result.subpath = subpath
+            await publishedprices_open_subpath(page, subpath)
+        
+        # Collect download links
+        links = await collect_links_on_page(page)
+        logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=publishedprices links={len(links)}")
+        
+        # Process each link
+        for link in links:
+            try:
+                data = await fetch_url_bytes(page, link)
+                md5_hash = md5_bytes(data)
+                
+                # Check for duplicates
+                if md5_hash in seen_hashes:
+                    result.skipped_dupes += 1
+                    continue
+                
+                # Normalize filename for name-based dedupe
+                filename = os.path.basename(urlparse(link).path)
+                normalized_name = f"{retailer_id}/{filename.lower()}"
+                if normalized_name in seen_names:
+                    result.skipped_dupes += 1
+                    continue
+                
+                # Add to seen sets
+                seen_hashes.add(md5_hash)
+                seen_names.add(normalized_name)
+                
+                # Upload to GCS
+                bucket = get_bucket()
+                if bucket:
+                    blob_path = f"raw/{retailer_id}/{filename}"
+                    await upload_to_gcs(bucket, blob_path, data)
+                
+                # Parse XML if applicable
+                if filename.lower().endswith(('.xml', '.gz', '.zip')):
+                    await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                
+                # Update counters
+                if filename.lower().endswith('.zip'):
+                    result.zips += 1
+                if filename.lower().endswith('.gz'):
+                    result.gz += 1
+                result.files_downloaded += 1
+                
+            except Exception as e:
+                result.errors.append(f"download_error:{e}")
+                continue
+                
+    except Exception as e:
+        result.errors.append(f"fatal:{e}")
+    
+    return result
 
+async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
+    """Bina projects adapter (no login)"""
+    result = RetailerResult(
+        retailer_id=retailer_id,
+        source_url=source.get("url", ""),
+        errors=[],
+        adapter="bina"
+    )
+    
+    try:
+        # Navigate to page
+        await page.goto(source.get("url", ""), wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("networkidle", timeout=10000)
+        
+        # Collect download links
+        links = await collect_links_on_page(page)
+        logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=bina links={len(links)}")
+        
+        # Process each link
+        for link in links:
+            try:
+                data = await fetch_url_bytes(page, link)
+                md5_hash = md5_bytes(data)
+                
+                # Check for duplicates
+                if md5_hash in seen_hashes:
+                    result.skipped_dupes += 1
+                    continue
+                
+                # Normalize filename for name-based dedupe
+                filename = os.path.basename(urlparse(link).path)
+                normalized_name = f"{retailer_id}/{filename.lower()}"
+                if normalized_name in seen_names:
+                    result.skipped_dupes += 1
+                    continue
+                
+                # Add to seen sets
+                seen_hashes.add(md5_hash)
+                seen_names.add(normalized_name)
+                
+                # Upload to GCS
+                bucket = get_bucket()
+                if bucket:
+                    blob_path = f"raw/{retailer_id}/{filename}"
+                    await upload_to_gcs(bucket, blob_path, data)
+                
+                # Parse XML if applicable
+                if filename.lower().endswith(('.xml', '.gz', '.zip')):
+                    await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                
+                # Update counters
+                if filename.lower().endswith('.zip'):
+                    result.zips += 1
+                if filename.lower().endswith('.gz'):
+                    result.gz += 1
+                result.files_downloaded += 1
+                
+            except Exception as e:
+                result.errors.append(f"download_error:{e}")
+                continue
+                
+    except Exception as e:
+        result.errors.append(f"fatal:{e}")
+    
+    return result
+
+async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
+    """Generic HTTP adapter (no login)"""
+    result = RetailerResult(
+        retailer_id=retailer_id,
+        source_url=source.get("url", ""),
+        errors=[],
+        adapter="generic"
+    )
+    
+    try:
+        # Navigate to page
+        await page.goto(source.get("url", ""), wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_load_state("networkidle", timeout=10000)
+        
+        # Collect download links
+        links = await collect_links_on_page(page)
+        logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=generic links={len(links)}")
+        
+        # Process each link
+        for link in links:
+            try:
+                data = await fetch_url_bytes(page, link)
+                md5_hash = md5_bytes(data)
+                
+                # Check for duplicates
+                if md5_hash in seen_hashes:
+                    result.skipped_dupes += 1
+                    continue
+                
+                # Normalize filename for name-based dedupe
+                filename = os.path.basename(urlparse(link).path)
+                normalized_name = f"{retailer_id}/{filename.lower()}"
+                if normalized_name in seen_names:
+                    result.skipped_dupes += 1
+                    continue
+                
+                # Add to seen sets
+                seen_hashes.add(md5_hash)
+                seen_names.add(normalized_name)
+                
+                # Upload to GCS
+                bucket = get_bucket()
+                if bucket:
+                    blob_path = f"raw/{retailer_id}/{filename}"
+                    await upload_to_gcs(bucket, blob_path, data)
+                
+                # Parse XML if applicable
+                if filename.lower().endswith(('.xml', '.gz', '.zip')):
+                    await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                
+                # Update counters
+                if filename.lower().endswith('.zip'):
+                    result.zips += 1
+                if filename.lower().endswith('.gz'):
+                    result.gz += 1
+                result.files_downloaded += 1
+                
+            except Exception as e:
+                result.errors.append(f"download_error:{e}")
+                continue
+                
+    except Exception as e:
+        result.errors.append(f"fatal:{e}")
+    
+    return result
+
+# ----------------------------
+# Helper Functions
+# ----------------------------
 
 async def fetch_url_bytes(page: Page, url: str) -> bytes:
-    # Try clicking if same page link; otherwise just fetch via page request
     resp = await page.request.get(url, timeout=90000)
     if not resp.ok:
         raise RuntimeError(f"download_failed status={resp.status}")
     return await resp.body()
 
-
-# ----------------------------
-# Main crawl per retailer
-# ----------------------------
-
-
-async def crawl_one(display_name: str, portal_url: str) -> RetailerResult:
-    result = RetailerResult(display_name=display_name, portal_url=portal_url, errors=[])
-    if should_ignore(display_name):
-        logger.info("Skipping (ignored): %s", display_name)
-        return result
-
-    # Retailer directory
-    retailer_dir = os.path.join(LOCAL_DOWNLOAD_DIR, safe_name(display_name))
-    retailer_json_dir = os.path.join(LOCAL_JSON_DIR, safe_name(display_name))
-    ensure_dirs(retailer_dir, retailer_json_dir, SCREENSHOTS_DIR)
-
-    # GCS
-    bucket = get_bucket()
-    gcs_prefix = f"raw/{safe_name(display_name)}"
-
-    parsed_host = urlparse(portal_url).netloc.lower()
-
-    async with async_playwright() as pw:
-        browser, ctx = await new_context(pw)
-        page = await ctx.new_page()
-
-        try:
-            # Special adapter for PublishedPrices tenants
-            if PUBLISHED_PRICES_HOST in parsed_host:
-                cred = get_cred_for(display_name)
-                if not cred:
-                    result.errors.append("no_credentials_mapped")
-                    logger.warning("No creds for %s", display_name)
-                    await ctx.close()
-                    await browser.close()
-                    return result
-
-                await login_publishedprices(
-                    page, portal_url, cred.get("username"), cred.get("password")
-                )
-                await screenshot_after_login(page, display_name)
-                links = await collect_download_links(page)
-
-            else:
-                # Generic: go to portal and collect .xml/.gz/.zip links
-                await page.goto(
-                    portal_url, wait_until="domcontentloaded", timeout=60000
-                )
-                await page.wait_for_load_state("networkidle", timeout=10000)
-                await screenshot_after_login(
-                    page, display_name
-                )  # snapshot even if no login
-                links = await collect_download_links(page)
-
-            if not links:
-                result.errors.append("no_download_links_found")
-                logger.warning("No download links for %s", display_name)
-                await ctx.close()
-                await browser.close()
-                return result
-
-            for href in links:
-                try:
-                    data = await fetch_url_bytes(page, href)
-                except Exception as e:
-                    result.errors.append(f"download_error:{e}")
-                    continue
-
-                # Local save
-                fname = (
-                    safe_name(os.path.basename(urlparse(href).path))
-                    or f"file_{md5_bytes(data)}"
-                )
-                local_path = os.path.join(retailer_dir, fname)
-                async with aiofiles.open(local_path, "wb") as f:
-                    await f.write(data)
-
-                # Upload to GCS
-                if bucket:
-                    await upload_to_gcs(bucket, f"{gcs_prefix}/{fname}", data)
-
-                # Counters
-                lower = fname.lower()
-                if lower.endswith(".zip"):
-                    result.zips += 1
-                if lower.endswith(".gz"):
-                    result.gz += 1
-                result.files_downloaded += 1
-
-                # Parse → JSONL (only XML content)
-                await _maybe_parse_to_jsonl(
-                    display_name, retailer_json_dir, fname, data
-                )
-
-        except Exception as e:
-            result.errors.append(f"fatal:{e}")
-        finally:
-            await ctx.close()
-            await browser.close()
-
-    return result
-
-
-async def _maybe_parse_to_jsonl(
-    display_name: str, json_dir: str, fname: str, data: bytes
-):
-    # Detect content → xml bytes
-    xml_bytes: Optional[bytes] = None
-    lf = fname.lower()
-
+async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
+    """Parse XML to JSONL and save to GCS"""
     try:
+        # Detect content → xml bytes
+        xml_bytes: Optional[bytes] = None
+        lf = filename.lower()
+
         if lf.endswith(".xml"):
             xml_bytes = data
         elif lf.endswith(".gz"):
             xml_bytes = gzip.decompress(data)
         elif lf.endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(data)) as z:
-                # take all .xml entries
                 for n in z.namelist():
                     if n.lower().endswith(".xml"):
                         xml_bytes = z.read(n)
-                        await _write_jsonl_for_xml(display_name, json_dir, n, xml_bytes)
-                return
-    except Exception:
-        return
+                        break
 
-    if xml_bytes:
-        await _write_jsonl_for_xml(display_name, json_dir, fname, xml_bytes)
+        if xml_bytes:
+            rows = parse_prices_xml(xml_bytes, company=retailer_id)
+            if rows:
+                # Save to GCS
+                bucket = get_bucket()
+                if bucket:
+                    jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+                    blob_path = f"json/{retailer_id}/{os.path.splitext(filename)[0]}.jsonl"
+                    await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
+    except Exception as e:
+        logger.warning(f"Failed to parse {filename}: {e}")
 
+# ----------------------------
+# Main Crawl Logic
+# ----------------------------
 
-async def _write_jsonl_for_xml(
-    display_name: str, json_dir: str, source_name: str, xml_bytes: bytes
-):
-    # Choose output name based on source timestamp; if newer, replace
-    base = os.path.splitext(os.path.basename(source_name))[0]
-    out_name = f"{base}.jsonl"
-    out_path = os.path.join(json_dir, out_name)
-
-    # Newer-than logic (prefer filename-embedded timestamp)
-    new_dt = parse_datetime_from_filename(source_name) or datetime.now(timezone.utc)
-    if os.path.exists(out_path):
-        # quick stamp compare via filename; if equal, overwrite, else keep the latest
-        existing_dt = parse_datetime_from_filename(
-            os.path.basename(out_path)
-        ) or datetime.fromtimestamp(os.path.getmtime(out_path), tz=timezone.utc)
-        if existing_dt and new_dt and new_dt <= existing_dt:
-            # Existing is same/newer → skip
-            return
-
-    company = display_name
-    rows = parse_prices_xml(xml_bytes, company=company)
-    if not rows:
-        return
-
-    os.makedirs(json_dir, exist_ok=True)
-    async with aiofiles.open(out_path, "w", encoding="utf-8") as f:
-        for r in rows:
-            await f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
+async def crawl_retailer(retailer: dict) -> List[dict]:
+    """Crawl a single retailer with all its sources"""
+    retailer_id = retailer.get("id", "unknown")
+    retailer_name = retailer.get("name", "Unknown")
+    
+    if should_ignore(retailer_name):
+        logger.info(f"Skipping (ignored): {retailer_name}")
+        return []
+    
+    # Get sources, sorted by priority if present
+    sources = retailer.get("sources", [])
+    if not sources:
+        # Fallback to single URL (legacy format)
+        url = retailer.get("url", "")
+        host = retailer.get("host", "")
+        if url:
+            sources = [{"url": url, "host": host}]
+        else:
+            logger.warning(f"No sources found for retailer {retailer_id}")
+            return []
+    
+    # Sort by priority
+    sources.sort(key=lambda s: s.get("priority", 999))
+    
+    # Deduplication sets (per retailer)
+    seen_hashes: Set[str] = set()
+    seen_names: Set[str] = set()
+    
+    results = []
+    
+    async with async_playwright() as pw:
+        browser, ctx = await new_context(pw)
+        page = await ctx.new_page()
+        
+        try:
+            for source in sources:
+                source_url = source.get("url", "")
+                if not source_url:
+                    continue
+                
+                # Determine adapter based on host/type
+                host = source.get("host", "").lower()
+                adapter_type = "generic"
+                
+                if PUBLISHED_HOST in host or "publishedprices" in host:
+                    adapter_type = "publishedprices"
+                elif "binaprojects" in host:
+                    adapter_type = "bina"
+                
+                # Run appropriate adapter
+                if adapter_type == "publishedprices":
+                    result = await publishedprices_adapter(page, source, retailer, retailer_id, seen_hashes, seen_names)
+                elif adapter_type == "bina":
+                    result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names)
+                else:
+                    result = await generic_adapter(page, source, retailer_id, seen_hashes, seen_names)
+                
+                results.append(result)
+                
+                # Log results
+                logger.info(f"retailer={retailer_id} source={source_url} adapter={adapter_type} "
+                          f"links={len(await collect_links_on_page(page))} downloaded={result.files_downloaded} "
+                          f"skipped_dupe={result.skipped_dupes}")
+                
+        finally:
+            await ctx.close()
+            await browser.close()
+    
+    return results
 
 # ----------------------------
 # Orchestrator
 # ----------------------------
 
-
-async def run_all(retailers: List[Tuple[str, str]]) -> List[dict]:
-    """Run all retailers concurrently; input is [(display_name, portal_url)]."""
+async def run_all(retailers: List[dict]) -> List[dict]:
+    """Run all retailers concurrently"""
     tasks = []
-    for display, url in retailers:
-        tasks.append(crawl_one(display, url))
+    for retailer in retailers:
+        if retailer.get("enabled", True):
+            tasks.append(crawl_retailer(retailer))
+    
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
+    
     out: List[dict] = []
-    for r in results:
-        if isinstance(r, Exception):
-            out.append({"error": str(r)})
+    for retailer_results in results:
+        if isinstance(retailer_results, Exception):
+            out.append({"error": str(retailer_results)})
         else:
-            out.append(r.as_dict())
+            for result in retailer_results:
+                out.append(result.as_dict())
+    
     return out

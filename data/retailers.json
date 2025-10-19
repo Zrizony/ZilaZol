@@ -1,0 +1,365 @@
+{
+  "version": 1,
+  "authProfiles": {
+    "publishedprices_shared": {
+      "type": "publishedprices",
+      "login_url": "https://url.publishedprices.co.il/login",
+      "post_login_path": "/file",
+      "tenants": {
+        "doralon": {"username": "doralon", "password": ""},
+        "TivTaam": {"username": "TivTaam", "password": "  "},
+        "yohananof": {"username": "yohananof", "password": ""},
+        "osherad": {"username": "osherad", "password": ""},
+        "SalachD": {"username": "SalachD", "password": "12345"},
+        "Stop_Market": {"username": "Stop_Market", "password": ""},
+        "politzer": {"username": "politzer", "password": ""},
+        "Paz_bo": {"username": "Paz_bo", "password": "paz468"},
+        "yuda_ho": {"username": "yuda_ho", "password": "Yud@147"},
+        "freshmarket": {"username": "freshmarket", "password": ""},
+        "Keshet": {"username": "Keshet", "password": ""},
+        "RamiLevi": {"username": "RamiLevi", "password": ""},
+        "SuperCofixApp": {"username": "SuperCofixApp", "password": ""}
+      }
+    }
+  },
+  "retailers": [
+    {
+      "id": "kingstore",
+      "name": "אלמשהדאוי קינג סטור בע\"מ",
+      "url": "https://kingstore.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "maayan2000",
+      "name": "ג.מ מעיין אלפיים (07) בע\"מ",
+      "url": "https://maayan2000.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "goodpharm",
+      "name": "גוד פארם בע\"מ",
+      "url": "https://goodpharm.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "carrefour",
+      "name": "קרפור ביתן אונליין",
+      "url": "https://prices.carrefour.co.il/",
+      "host": "carrefour.co.il",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "quik",
+      "name": "קוויק",
+      "url": "https://prices.quik.co.il/",
+      "host": "quik.co.il",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "doralon",
+      "name": "דור אלון ניהול מתחמים קמעונאיים בע\"מ",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "doralon",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "wolt",
+      "name": "וולט אופריישנס סרוויסס ישראל בע\"מ",
+      "url": "https://wm-gateway.wolt.com/isr-prices/public/v1/index.html",
+      "host": "",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "victorymarket",
+      "name": "ויקטורי רשת סופרמרקטים בע\"מ",
+      "url": "https://laibcatalog.co.il/",
+      "host": "",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "zolvebegadol",
+      "name": "זול ובגדול בע\"מ",
+      "url": "https://zolvebegadol.binaprojects.com/Main.aspx",
+      "host": "",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "chokent",
+      "name": "ח. כהן סוכנות מזון ומשקאות בע\"מ",
+      "url": "https://laibcatalog.co.il/",
+      "host": "",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "tivtaam",
+      "name": "טיב טעם",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "TivTaam",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "machneshoshek",
+      "name": "כ. נ מחסני השוק בע\"מ",
+      "url": "https://machneshoshek.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "yohananof",
+      "name": "מ. יוחננוף ובניו (1988) בע\"מ",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "yohananof",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "osherad",
+      "name": "מרב-מזון כל בו בע\"מ (אושר עד)",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "osherad",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "nativhachad",
+      "name": "נתיב החסד - סופר חסד בע\"מ (כולל ברכל)",
+      "url": "http://141.226.203.152/",
+      "host": "",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "salachd",
+      "name": "סאלח דבאח ובניו בע\"מ",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "SalachD",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "supersapir",
+      "name": "סופר ספיר בע\"מ",
+      "url": "https://supersapir.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "superpharm",
+      "name": "סופר פארם (ישראל) בע\"מ",
+      "url": "https://prices.super-pharm.co.il/",
+      "host": "super-pharm.co.il",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "citymarket",
+      "name": "סיטי מרקט",
+      "enabled": true,
+      "tags": ["multi-source", "bina", "public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"],
+      "sources": [
+        {
+          "url": "https://citymarketkiryatgat.binaprojects.com/Main.aspx",
+          "host": "binaprojects.com",
+          "tags": ["bina", "no-login"],
+          "priority": 1
+        },
+        {
+          "url": "https://www.citymarket-shops.co.il/?d=2024-08-18",
+          "host": "citymarket-shops.co.il",
+          "tags": ["public", "no-login"],
+          "priority": 2
+        }
+      ]
+    },
+    {
+      "id": "stopmarket",
+      "name": "סטופ מרקט בע\"מ",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "Stop_Market",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "superbareket",
+      "name": "עוף והודו ברקת - חנות המפעל בע\"מ",
+      "url": "https://superbareket.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "politzer",
+      "name": "פוליצר חדרה (1982) בע\"מ",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "politzer",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "yellow",
+      "name": "יילו",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "yellow",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "superyuda",
+      "name": "סופר יודה",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "yuda_ho",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "freshmarket",
+      "name": "פרשמרקט",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "freshmarket",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "ktshivuk",
+      "name": "קיי.טי. יבוא ושיווק בע\"מ (משנת יוסף)",
+      "enabled": true,
+      "tags": ["multi-source", "bina", "public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"],
+      "sources": [
+        {
+          "url": "https://ktshivuk.binaprojects.com/Main.aspx",
+          "host": "binaprojects.com",
+          "tags": ["bina", "no-login"],
+          "priority": 1
+        },
+        {
+          "url": "https://chp-kt.pages.dev/",
+          "host": "pages.dev",
+          "tags": ["public", "no-login"],
+          "priority": 2
+        }
+      ]
+    },
+    {
+      "id": "keshet",
+      "name": "קשת טעמים",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "Keshet",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "ramilevi",
+      "name": "רמי לוי",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "RamiLevi",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "supercofix",
+      "name": "סופר קופיקס",
+      "url": "https://url.publishedprices.co.il/login",
+      "host": "publishedprices.co.il",
+      "enabled": true,
+      "tags": ["publishedprices", "login"],
+      "authRef": "publishedprices_shared",
+      "tenantKey": "SuperCofixApp",
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "shufersal",
+      "name": "שופרסל בע\"מ (כולל רשת BE)",
+      "url": "http://prices.shufersal.co.il/",
+      "host": "shufersal.co.il",
+      "enabled": true,
+      "tags": ["public", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "shukhayir",
+      "name": "שוק העיר (ט.ע.מ.ס.) בע\"מ",
+      "url": "https://shuk-hayir.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    },
+    {
+      "id": "shefabirkathashem",
+      "name": "שפע ברכת השם בע\"מ",
+      "url": "https://shefabirkathashem.binaprojects.com/Main.aspx",
+      "host": "binaprojects.com",
+      "enabled": true,
+      "tags": ["bina", "no-login"],
+      "download_patterns": [".xml", ".gz", ".zip"]
+    }
+  ]
+}
