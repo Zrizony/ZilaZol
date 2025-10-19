@@ -6,11 +6,12 @@ import json
 import os
 import re
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
 
+import aiofiles
 import gzip
 import zipfile
 from playwright.async_api import async_playwright, Page
@@ -28,7 +29,6 @@ LOCAL_JSON_DIR = os.getenv("LOCAL_JSON_DIR", "json_out")
 SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
 MAX_LOGIN_RETRIES = int(os.getenv("MAX_RETRIES_LOGIN", "3"))
 
-IGNORE_DISPLAY_SUBSTRINGS = ["וולט", "סטופ מרקט"]
 
 # Per-tenant creds (public list per your input)
 CREDS: Dict[str, Dict[str, str]] = {
@@ -88,8 +88,6 @@ def ensure_dirs(*paths: str):
     for p in paths:
         os.makedirs(p, exist_ok=True)
 
-def should_ignore(display_name: str) -> bool:
-    return any(bad in (display_name or "") for bad in IGNORE_DISPLAY_SUBSTRINGS)
 
 # ----------------------------
 # GCS
@@ -178,7 +176,7 @@ async def new_context(pw):
 
 async def screenshot_after_login(page: Page, display_name: str):
     ensure_dirs(SCREENSHOTS_DIR)
-    fname = f"{safe_name(display_name)}_{ts()}.png"
+    fname = f"{safe_name(display_name)}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.png"
     await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
 
 # ----------------------------
@@ -464,7 +462,25 @@ async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
         if lf.endswith(".xml"):
             xml_bytes = data
         elif lf.endswith(".gz"):
-            xml_bytes = gzip.decompress(data)
+            # Try GZIP first, but if it fails and looks like ZIP, try ZIP
+            try:
+                xml_bytes = gzip.decompress(data)
+            except Exception as gzip_error:
+                # Check if it's actually a ZIP file (starts with PK signature)
+                if data.startswith(b'PK'):
+                    logger.debug(f"File {filename} appears to be ZIP despite .gz extension, trying ZIP decompression")
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(data)) as z:
+                            for n in z.namelist():
+                                if n.lower().endswith(".xml"):
+                                    xml_bytes = z.read(n)
+                                    break
+                    except Exception as zip_error:
+                        logger.warning(f"Failed to parse {filename}: GZIP failed ({gzip_error}), ZIP also failed ({zip_error})")
+                        return
+                else:
+                    logger.warning(f"Failed to parse {filename}: {gzip_error}")
+                    return
         elif lf.endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 for n in z.namelist():
@@ -493,9 +509,6 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
     retailer_id = retailer.get("id", "unknown")
     retailer_name = retailer.get("name", "Unknown")
     
-    if should_ignore(retailer_name):
-        logger.info(f"Skipping (ignored): {retailer_name}")
-        return []
     
     # Get sources, sorted by priority if present
     sources = retailer.get("sources", [])
