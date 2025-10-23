@@ -39,13 +39,51 @@ def retailers_debug():
         ]
     }), 200
 
-@app.post("/run")
+@app.route("/run", methods=["POST"])
 def run():
     try:
+        # Parse JSON payload
+        payload = request.get_json() or {}
+        retailer_filter = payload.get("retailer")
+        dry_run = payload.get("dry_run", False)
+        
+        # Load retailer configuration
         cfg = load_retailers_config()
-        retailers = [r for r in cfg.get("retailers", []) if r.get("enabled", True)]
+        all_retailers = cfg.get("retailers", [])
+        
+        # Filter retailers if specific one requested
+        if retailer_filter:
+            retailers = [r for r in all_retailers if r.get("id") == retailer_filter or r.get("name") == retailer_filter]
+            if not retailers:
+                return jsonify({"status": "error", "error": f"Retailer '{retailer_filter}' not found"}), 404
+        else:
+            retailers = [r for r in all_retailers if r.get("enabled", True)]
+        
+        if dry_run:
+            return jsonify({
+                "status": "dry_run",
+                "retailers_found": len(retailers),
+                "retailer_names": [r.get("name") for r in retailers]
+            }), 200
+        
+        # Run the crawler
         results = asyncio.run(run_all(retailers))
-        return jsonify({"status": "done", "count": len(results), "results": results}), 200
+        
+        # Calculate summary statistics
+        total_files = sum(r.get("files_downloaded", 0) for r in results)
+        total_links = sum(r.get("links_found", 0) for r in results)
+        total_errors = sum(len(r.get("errors", [])) for r in results)
+        
+        return jsonify({
+            "status": "done",
+            "retailers_processed": len(retailers),
+            "results_count": len(results),
+            "total_links_found": total_links,
+            "total_files_downloaded": total_files,
+            "total_errors": total_errors,
+            "results": results
+        }), 200
+        
     except Exception as e:
         # Return 200 so Cloud Scheduler stops retrying forever
         current_app.logger.exception("run_failed")

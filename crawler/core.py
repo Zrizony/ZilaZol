@@ -8,6 +8,7 @@ import re
 import hashlib
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+import uuid
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
 
@@ -46,29 +47,26 @@ class RetailerResult:
 # Settings / Constants
 # ----------------------------
 
-PRICES_BUCKET = os.getenv("PRICES_BUCKET") or os.getenv("BUCKET_NAME")
+# Unified bucket environment variable handling
+BUCKET = (
+    os.getenv("GCS_BUCKET")
+    or os.getenv("PRICES_BUCKET")
+    or os.getenv("BUCKET_NAME")
+)
+if not BUCKET:
+    raise RuntimeError("No bucket configured. Set GCS_BUCKET (preferred) or PRICES_BUCKET/BUCKET_NAME.")
 LOCAL_DOWNLOAD_DIR = os.getenv("LOCAL_DOWNLOAD_DIR", "downloads")
 LOCAL_JSON_DIR = os.getenv("LOCAL_JSON_DIR", "json_out")
 SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
 MAX_LOGIN_RETRIES = int(os.getenv("MAX_RETRIES_LOGIN", "3"))
 
 
-# Per-tenant creds (public list per your input)
-CREDS: Dict[str, Dict[str, str]] = {
-    "doralon": {"username": "doralon"},
-    "TivTaam": {"username": "TivTaam"},
-    "yohananof": {"username": "yohananof"},
-    "osherad": {"username": "osherad"},
-    "SalachD": {"username": "SalachD", "password": "12345"},
-    "Stop_Market": {"username": "Stop_Market"},
-    "politzer": {"username": "politzer"},
-    "Paz_bo": {"username": "Paz_bo", "password": "paz468"},
-    "yuda_ho": {"username": "yuda_ho", "password": "Yud@147"},
-    "freshmarket": {"username": "freshmarket"},
-    "Keshet": {"username": "Keshet"},
-    "RamiLevi": {"username": "RamiLevi"},
-    "SuperCofixApp": {"username": "SuperCofixApp"},
-}
+# Load credentials from environment variable
+RAW_CREDS = os.getenv("RETAILER_CREDS_JSON", "{}")
+try:
+    CREDS = json.loads(RAW_CREDS)
+except Exception as e:
+    raise RuntimeError(f"Invalid RETAILER_CREDS_JSON: {e}")
 
 PUBLISHED_HOST = "url.publishedprices.co.il"
 DOWNLOAD_SUFFIXES = (".xml", ".gz", ".zip")
@@ -135,19 +133,25 @@ def ensure_dirs(*paths: str):
 # ----------------------------
 
 def get_bucket() -> Optional[storage.Bucket]:
-    if not PRICES_BUCKET:
+    if not BUCKET:
         return None
     client = storage.Client()
-    return client.bucket(PRICES_BUCKET)
+    return client.bucket(BUCKET)
 
 async def upload_to_gcs(
     bucket: storage.Bucket,
     blob_path: str,
     data: bytes,
     content_type: str = "application/octet-stream",
+    md5_hex: str = None,
 ):
     blob = bucket.blob(blob_path)
     blob.upload_from_string(data, content_type=content_type)
+    
+    # Set MD5 metadata if provided
+    if md5_hex:
+        blob.metadata = {"md5_hex": md5_hex}
+        blob.patch()
 
 # ----------------------------
 # XML → JSONL parser
@@ -224,7 +228,7 @@ async def screenshot_after_login(page: Page, display_name: str):
 # PublishedPrices Adapter
 # ----------------------------
 
-async def crawl_publishedprices(page: Page, retailer: dict, creds: dict) -> RetailerResult:
+async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id: str) -> RetailerResult:
     """
     Main entrypoint for publishedprices adapter
     retailer: dict from retailers.json (has name, url, adapter='publishedprices', cred_key, optional 'folder')
@@ -261,6 +265,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict) -> Reta
         # Step 4: Download and process files
         seen_hashes: Set[str] = set()
         seen_names: Set[str] = set()
+        manifest_entries: List[dict] = []
         
         for link in links:
             try:
@@ -284,11 +289,22 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict) -> Reta
                 seen_hashes.add(md5_hash)
                 seen_names.add(normalized_name)
                 
-                # Upload to GCS
+                # Upload to GCS with new path structure
                 bucket = get_bucket()
                 if bucket:
-                    blob_path = f"raw/{retailer_id}/{filename}"
-                    await upload_to_gcs(bucket, blob_path, data)
+                    blob_path = f"raw/{retailer_id}/{run_id}/{filename}"
+                    await upload_to_gcs(bucket, blob_path, data, md5_hex=md5_hash)
+                    
+                    # Add to manifest
+                    manifest_entries.append({
+                        "filename": filename,
+                        "gcs_path": blob_path,
+                        "md5_hex": md5_hash,
+                        "bytes": len(data),
+                        "ts": datetime.now(timezone.utc).isoformat()
+                    })
+                    
+                    logger.info("upload.ok retailer=%s file=%s gcs_path=%s", retailer_id, filename, blob_path)
                 
                 # Parse XML if applicable
                 if filename.lower().endswith(('.xml', '.gz', '.zip')):
@@ -303,7 +319,25 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict) -> Reta
                 
             except Exception as e:
                 result.errors.append(f"download_error:{e}")
+                logger.error("upload.failed retailer=%s file=%s err=%s", retailer_id, filename, str(e))
                 continue
+        
+        # Write manifest.json
+        if manifest_entries and bucket:
+            try:
+                manifest_data = json.dumps({
+                    "run_id": run_id,
+                    "retailer_id": retailer_id,
+                    "retailer_name": retailer.get("name", "Unknown"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "files": manifest_entries
+                }, indent=2)
+                
+                manifest_path = f"raw/{retailer_id}/{run_id}/manifest.json"
+                await upload_to_gcs(bucket, manifest_path, manifest_data.encode('utf-8'), "application/json")
+                logger.info("manifest.written retailer=%s run_id=%s files=%d", retailer_id, run_id, len(manifest_entries))
+            except Exception as e:
+                logger.error("manifest.failed retailer=%s err=%s", retailer_id, str(e))
                 
     except Exception as e:
         result.errors.append(f"fatal:{e}")
@@ -312,7 +346,9 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict) -> Reta
     return result
 
 async def publishedprices_login(page: Page, username: str, password: str):
-    """Login to publishedprices with robust selector handling"""
+    """Login to publishedprices with robust selector handling and explicit waits"""
+    logger.info("login.start retailer=publishedprices")
+    
     await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=90000)
     
     # Try username selectors
@@ -336,40 +372,74 @@ async def publishedprices_login(page: Page, username: str, password: str):
             await page.click(sel)
             break
     
-    # Wait for successful login
+    # Wait for successful login with explicit UI signal
     try:
+        # Wait for URL change or file manager elements
         await page.wait_for_url("**/file**", timeout=25000)
+        logger.info("login.success retailer=publishedprices")
     except:
+        # Fallback: navigate to file page and wait for file manager
         await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=25000)
+        # Wait for file manager to load
+        await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
+        logger.info("login.success retailer=publishedprices")
 
 async def publishedprices_navigate_to_folder(page: Page, folder: str):
-    """Navigate to specific folder (Super Yuda special case)"""
+    """Navigate to specific folder with robust waits and retries"""
+    logger.info("folder.navigate retailer=publishedprices folder=%s", folder)
+    
+    # Wait for file/folder tree to render
+    await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
+    await page.wait_for_load_state("networkidle", timeout=10000)
+    
     # First try direct navigation
     target_url = f"https://url.publishedprices.co.il/file/cdup/{folder.strip('/')}/"
     try:
         await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(1000)
         
         # Check if we have files listed
         links = await publishedprices_collect_links(page)
         if links:
+            logger.info("folder.navigate.success retailer=publishedprices folder=%s method=direct", folder)
             return  # Success, we have files
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("folder.navigate.direct_failed retailer=publishedprices folder=%s error=%s", folder, str(e))
     
     # Fallback: go to /file and click the folder
     await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_timeout(500)
+    await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
+    await page.wait_for_load_state("networkidle", timeout=10000)
     
-    # Try clicking folder by name
-    for sel in [
-        f"a:has-text('{folder}')",
-        f"tr:has(td:has-text('{folder}')) a[href]"
-    ]:
-        if await page.locator(sel).count():
-            await page.click(sel)
-            await page.wait_for_timeout(800)
-            break
+    # Try clicking folder by name with retries
+    for attempt in range(2):
+        try:
+            # Try multiple selectors for folder clicking
+            folder_selectors = [
+                f"a:has-text('{folder}')",
+                f"tr:has(td:has-text('{folder}')) a[href]",
+                f"td:has-text('{folder}') a",
+                f"*:has-text('{folder}'):not(script):not(style)"
+            ]
+            
+            for sel in folder_selectors:
+                if await page.locator(sel).count():
+                    await page.click(sel)
+                    await page.wait_for_timeout(1500)
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    
+                    # Verify we're in the folder by checking for files
+                    links = await publishedprices_collect_links(page)
+                    if links:
+                        logger.info("folder.navigate.success retailer=publishedprices folder=%s method=click attempt=%d", folder, attempt + 1)
+                        return
+                    break
+        except Exception as e:
+            logger.warning("folder.navigate.click_failed retailer=publishedprices folder=%s attempt=%d error=%s", folder, attempt + 1, str(e))
+            if attempt == 0:
+                await page.wait_for_timeout(2000)  # Wait before retry
+    
+    logger.error("folder.not_found retailer=publishedprices folder=%s", folder)
 
 async def publishedprices_collect_links(page: Page) -> List[str]:
     """Collect download links from publishedprices file manager"""
@@ -429,7 +499,7 @@ async def collect_links_on_page(page) -> list[str]:
 # ----------------------------
 
 
-async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
+async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str], run_id: str) -> RetailerResult:
     """Bina projects adapter (no login)"""
     result = RetailerResult(
         retailer_id=retailer_id,
@@ -475,7 +545,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                 # Upload to GCS
                 bucket = get_bucket()
                 if bucket:
-                    blob_path = f"raw/{retailer_id}/{filename}"
+                    blob_path = f"raw/{retailer_id}/{run_id}/{filename}"
                     await upload_to_gcs(bucket, blob_path, data)
                 
                 # Parse XML if applicable
@@ -498,7 +568,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
     
     return result
 
-async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
+async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str], run_id: str) -> RetailerResult:
     """Generic HTTP adapter (no login)"""
     result = RetailerResult(
         retailer_id=retailer_id,
@@ -559,7 +629,7 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                 # Upload to GCS
                 bucket = get_bucket()
                 if bucket:
-                    blob_path = f"raw/{retailer_id}/{filename}"
+                    blob_path = f"raw/{retailer_id}/{run_id}/{filename}"
                     await upload_to_gcs(bucket, blob_path, data)
                 
                 # Parse XML if applicable
@@ -638,7 +708,7 @@ async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
 # Main Crawl Logic
 # ----------------------------
 
-async def crawl_retailer(retailer: dict) -> List[dict]:
+async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
     """Crawl a single retailer with all its sources"""
     retailer_id = retailer.get("id", "unknown")
     retailer_name = retailer.get("name", "Unknown")
@@ -690,19 +760,21 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
                     # Get credentials for publishedprices
                     creds_key = source.get("creds_key") or retailer.get("tenantKey")
                     if not creds_key or creds_key not in CREDS:
+                        error_msg = f"no_credentials_mapped for key '{creds_key}'"
+                        logger.error(f"credentials.missing retailer={retailer_id} creds_key={creds_key}")
                         result = RetailerResult(
                             retailer_id=retailer_id,
                             source_url=source_url,
-                            errors=["no_credentials_mapped"],
+                            errors=[error_msg],
                             adapter="publishedprices"
                         )
                     else:
                         credentials = CREDS[creds_key]
-                        result = await crawl_publishedprices(page, retailer, credentials)
+                        result = await crawl_publishedprices(page, retailer, credentials, run_id)
                 elif adapter_type == "bina":
-                    result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names)
+                    result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 else:
-                    result = await generic_adapter(page, source, retailer_id, seen_hashes, seen_names)
+                    result = await generic_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 
                 results.append(result)
                 
@@ -723,14 +795,18 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
 
 async def run_all(retailers: List[dict]) -> List[dict]:
     """Run all retailers concurrently"""
-    # Warn if PRICES_BUCKET is missing
-    if not PRICES_BUCKET:
-        logger.warning("PRICES_BUCKET environment variable not set - GCS uploads will be skipped")
+    # Generate run ID for this execution
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid.uuid4())[:8]
+    logger.info("run.start run_id=%s retailers=%d", run_id, len(retailers))
+    
+    # Warn if BUCKET is missing
+    if not BUCKET:
+        logger.warning("No bucket configured - GCS uploads will be skipped")
 
     tasks = []
     for retailer in retailers:
         if retailer.get("enabled", True):
-            tasks.append(crawl_retailer(retailer))
+            tasks.append(crawl_retailer(retailer, run_id))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
