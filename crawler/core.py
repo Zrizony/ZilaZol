@@ -224,179 +224,47 @@ async def screenshot_after_login(page: Page, display_name: str):
 # PublishedPrices Adapter
 # ----------------------------
 
-async def publishedprices_login(page, login_url: str, username: str, password: str):
-    await page.goto(login_url, wait_until="domcontentloaded", timeout=90000)
-    # Try common selectors; don't fail if password is empty
-    for sel in ["input[name='username']", "#username", "input[type='email']"]:
-        if await page.locator(sel).count():
-            await page.fill(sel, username)
-            break
-    for sel in ["input[name='password']", "#password", "input[type='password']"]:
-        if password and await page.locator(sel).count():
-            await page.fill(sel, password)
-            break
-    for sel in ["button[type='submit']", "input[type='submit']",
-                "button:has-text('כניסה')", "button:has-text('Login')"]:
-        if await page.locator(sel).count():
-            await page.click(sel)
-            break
-    try:
-        await page.wait_for_url("**/file**", timeout=25000)
-    except:
-        await page.goto(f"https://{PUBLISHED_HOST}/file", wait_until="domcontentloaded")
-
-async def publishedprices_open_file_home(page: Page):
-    """Force navigate to Cerberus file root after login"""
-    await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(500)  # allow Cloudflare repaint
-    # Try multiple expected selectors; don't fail hard—just log
-    candidates = [
-        "table.dataTable",           # common Cerberus table
-        "table#filelist",            # some skins
-        "div#filemanager",           # wrapper
-        "div.dataTables_wrapper"     # wrapper
-    ]
-    for sel in candidates:
-        if await page.locator(sel).count():
-            return True
-    return False
-
-async def publishedprices_open_subpath(page: Page, subpath: str):
-    """Navigate to subfolder with fallback to clicking"""
-    # Try direct
-    target_url = f"https://url.publishedprices.co.il/file/cdup/{subpath.strip('/')}/"
-    try:
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(500)
-    except Exception:
-        pass
-
-    # If no rows/links present, try clicking the folder in the listing
-    has_table = await page.locator("table.dataTable, table#filelist, div#filemanager, div.dataTables_wrapper").count()
-    if not has_table:
-        await publishedprices_open_file_home(page)
-
-    # Try clicking folder by name
-    for sel in [
-        f"a:has-text('{subpath}')",
-        f"tr:has(td:has-text('{subpath}')) a[href]"
-    ]:
-        if await page.locator(sel).count():
-            await page.click(sel)
-            await page.wait_for_timeout(800)
-            break
-
-async def publishedprices_collect_links(page: Page) -> List[str]:
-    """Robust link collector for publishedprices (Cerberus variants)"""
-    # anchor types we want: explicit file links, 'get' endpoints, anything ending with .xml/.gz/.zip
-    selectors = [
-        "a[download]",
-        "a[href*='/get/']",
-        "a[href*='?get=']",
-        "a[href$='.xml' i]",
-        "a[href$='.gz' i]",
-        "a[href$='.zip' i]",
-        "a[href*='.xml?' i]",
-        "a[href*='.gz?' i]",
-        "a[href*='.zip?' i]",
-    ]
-
-    hrefs = set()
-    for sel in selectors:
-        # gather in batches; the table updates frequently
-        if await page.locator(sel).count():
-            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.getAttribute('href'))")
-            for h in (vals or []):
-                if not h:
-                    continue
-                try:
-                    abs_url = await page.evaluate("u => new URL(u, location.href).href", h)
-                    hrefs.add(abs_url)
-                except Exception:
-                    pass
-
-    return sorted(hrefs)
-
-async def collect_links_on_page(page) -> list[str]:
-    """Collect download links with broader filters for generic sites"""
-    # Expanded selectors for better link discovery
-    selectors = [
-        "a[download]",
-        "a[href*='download']",
-        "a[href*='file']",
-        "a[href$='.xml' i]",
-        "a[href$='.gz' i]",
-        "a[href$='.zip' i]",
-        "a[href*='.xml?' i]",
-        "a[href*='.gz?' i]",
-        "a[href*='.zip?' i]",
-    ]
+async def crawl_publishedprices(page: Page, retailer: dict, creds: dict) -> RetailerResult:
+    """
+    Main entrypoint for publishedprices adapter
+    retailer: dict from retailers.json (has name, url, adapter='publishedprices', cred_key, optional 'folder')
+    creds: {'username': ..., 'password': ...}
+    """
+    retailer_id = retailer.get("id", "unknown")
+    retailer_name = retailer.get("name", "Unknown")
     
-    hrefs = set()
-    for sel in selectors:
-        if await page.locator(sel).count():
-            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
-            for h in (vals or []):
-                if h and h.lower().endswith(DOWNLOAD_SUFFIXES):
-                    hrefs.add(h)
-    
-    return sorted(hrefs)
-
-# ----------------------------
-# Adapters
-# ----------------------------
-
-async def publishedprices_adapter(page: Page, source: dict, retailer: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
-    """PublishedPrices adapter with optional subfolder support"""
     result = RetailerResult(
         retailer_id=retailer_id,
-        source_url=source.get("url", ""),
+        source_url=retailer.get("url", ""),
         errors=[],
         adapter="publishedprices"
     )
     
-    # Get credentials from retailer level (authRef/tenantKey) or source level (creds_key)
-    creds_key = source.get("creds_key") or retailer.get("tenantKey")
-    if not creds_key or creds_key not in CREDS:
-        result.errors.append("no_credentials_mapped")
-        return result
-    
-    credentials = CREDS[creds_key]
-    username = credentials.get("username")
-    password = credentials.get("password", "")
+    logger.info("publishedprices: retailer=%s", retailer_name)
     
     try:
-        # Login
-        await publishedprices_login(f"https://{PUBLISHED_HOST}/login", username, password)
+        # Step 1: Login
+        await publishedprices_login(page, creds["username"], creds.get("password", ""))
+        logger.info("publishedprices: logged_in=True")
         
-        # Navigate to file home
-        await publishedprices_open_file_home(page)
+        # Step 2: Handle folder navigation (Super Yuda special case)
+        folder = retailer.get("folder")
+        if folder:
+            await publishedprices_navigate_to_folder(page, folder)
+            result.subpath = folder
         
-        # Navigate to subfolder if specified
-        subpath = source.get("subpath")
-        # Special case: Super Yuda needs Yuda subfolder
-        if not subpath and retailer_id == "superyuda":
-            subpath = "Yuda"
-        if subpath:
-            result.subpath = subpath
-            await publishedprices_open_subpath(page, subpath)
-        
-        # Collect download links using robust collector
+        # Step 3: Collect files
         links = await publishedprices_collect_links(page)
         result.links_found = len(links)
+        logger.info("publishedprices: links=%d", len(links))
         
-        # If no links found, take screenshot and log warning
-        if not links:
-            ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-            fname = f"{retailer_id}_publishedprices_no_links_{ts}.png"
-            await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
-            logger.warning(f"[{retailer_id}] No links found at {page.url}. Saved screenshot: {fname}")
+        # Step 4: Download and process files
+        seen_hashes: Set[str] = set()
+        seen_names: Set[str] = set()
         
-        logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=publishedprices links={len(links)}")
-        
-        # Process each link
         for link in links:
             try:
+                # Download file
                 data = await fetch_url_bytes(page, link)
                 md5_hash = md5_bytes(data)
                 
@@ -439,8 +307,127 @@ async def publishedprices_adapter(page: Page, source: dict, retailer: dict, reta
                 
     except Exception as e:
         result.errors.append(f"fatal:{e}")
+        logger.error(f"publishedprices error for {retailer_name}: {e}")
     
     return result
+
+async def publishedprices_login(page: Page, username: str, password: str):
+    """Login to publishedprices with robust selector handling"""
+    await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=90000)
+    
+    # Try username selectors
+    username_selectors = ["input[name='username']", "#username", "input[name='Email']", "input[type='email']"]
+    for sel in username_selectors:
+        if await page.locator(sel).count():
+            await page.fill(sel, username)
+            break
+    
+    # Try password selectors
+    password_selectors = ["input[name='password']", "#password", "input[type='password']"]
+    for sel in password_selectors:
+        if password and await page.locator(sel).count():
+            await page.fill(sel, password)
+            break
+    
+    # Try submit selectors
+    submit_selectors = ["button[type='submit']", "input[type='submit']", "button:has-text('כניסה')", "button:has-text('Login')"]
+    for sel in submit_selectors:
+        if await page.locator(sel).count():
+            await page.click(sel)
+            break
+    
+    # Wait for successful login
+    try:
+        await page.wait_for_url("**/file**", timeout=25000)
+    except:
+        await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=25000)
+
+async def publishedprices_navigate_to_folder(page: Page, folder: str):
+    """Navigate to specific folder (Super Yuda special case)"""
+    # First try direct navigation
+    target_url = f"https://url.publishedprices.co.il/file/cdup/{folder.strip('/')}/"
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(500)
+        
+        # Check if we have files listed
+        links = await publishedprices_collect_links(page)
+        if links:
+            return  # Success, we have files
+    except Exception:
+        pass
+    
+    # Fallback: go to /file and click the folder
+    await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_timeout(500)
+    
+    # Try clicking folder by name
+    for sel in [
+        f"a:has-text('{folder}')",
+        f"tr:has(td:has-text('{folder}')) a[href]"
+    ]:
+        if await page.locator(sel).count():
+            await page.click(sel)
+            await page.wait_for_timeout(800)
+            break
+
+async def publishedprices_collect_links(page: Page) -> List[str]:
+    """Collect download links from publishedprices file manager"""
+    # Wait for page to load
+    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_load_state("networkidle")
+    await page.wait_for_timeout(500)
+    
+    # Get all hrefs
+    hrefs = await page.eval_on_selector_all(
+        "a[href]",
+        "els => els.map(a => a.getAttribute('href'))"
+    )
+    
+    # Normalize to absolute URLs and filter
+    links = []
+    for h in (hrefs or []):
+        if not h:
+            continue
+        try:
+            h_abs = await page.evaluate("u => new URL(u, location.href).href", h)
+            low = h_abs.lower()
+            if low.endswith((".xml", ".gz", ".zip")) or "download" in low:
+                links.append(h_abs)
+        except Exception:
+            pass
+    
+    return sorted(set(links))
+
+async def collect_links_on_page(page) -> list[str]:
+    """Collect download links with broader filters for generic sites"""
+    # Expanded selectors for better link discovery
+    selectors = [
+        "a[download]",
+        "a[href*='download']",
+        "a[href*='file']",
+        "a[href$='.xml' i]",
+        "a[href$='.gz' i]",
+        "a[href$='.zip' i]",
+        "a[href*='.xml?' i]",
+        "a[href*='.gz?' i]",
+        "a[href*='.zip?' i]",
+    ]
+    
+    hrefs = set()
+    for sel in selectors:
+        if await page.locator(sel).count():
+            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
+            for h in (vals or []):
+                if h and h.lower().endswith(DOWNLOAD_SUFFIXES):
+                    hrefs.add(h)
+    
+    return sorted(hrefs)
+
+# ----------------------------
+# Adapters
+# ----------------------------
+
 
 async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str]) -> RetailerResult:
     """Bina projects adapter (no login)"""
@@ -700,7 +687,18 @@ async def crawl_retailer(retailer: dict) -> List[dict]:
                 
                 # Run appropriate adapter
                 if adapter_type == "publishedprices":
-                    result = await publishedprices_adapter(page, source, retailer, retailer_id, seen_hashes, seen_names)
+                    # Get credentials for publishedprices
+                    creds_key = source.get("creds_key") or retailer.get("tenantKey")
+                    if not creds_key or creds_key not in CREDS:
+                        result = RetailerResult(
+                            retailer_id=retailer_id,
+                            source_url=source_url,
+                            errors=["no_credentials_mapped"],
+                            adapter="publishedprices"
+                        )
+                    else:
+                        credentials = CREDS[creds_key]
+                        result = await crawl_publishedprices(page, retailer, credentials)
                 elif adapter_type == "bina":
                     result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names)
                 else:

@@ -267,6 +267,7 @@
       "tags": ["publishedprices", "login"],
       "authRef": "publishedprices_shared",
       "tenantKey": "yuda_ho",
+      "folder": "Yuda",
       "download_patterns": [".xml", ".gz", ".zip"]
     },
     {
