@@ -20,6 +20,8 @@ from google.cloud import storage
 
 from . import logger
 from .config import load_retailers_config
+from .archive_utils import iter_xml_entries, sniff_format, md5_hex, iso_now
+import re
 
 # ----------------------------
 # Data Classes
@@ -99,6 +101,13 @@ CREDS = _load_publishedprices_creds()
 
 PUBLISHED_HOST = "url.publishedprices.co.il"
 DEFAULT_DOWNLOAD_SUFFIXES = (".xml", ".gz", ".zip")
+VALID_PATTERNS = (".xml", ".gz", ".zip")
+
+def looks_like_price_file(url: str) -> bool:
+    u = (url or "").lower()
+    if any(p in u for p in VALID_PATTERNS):
+        return True
+    return ("pricefull" in u) or ("price" in u)
 
 # ----------------------------
 # Data Models
@@ -130,8 +139,7 @@ class RetailerResult:
 def safe_name(s: str) -> str:
     return re.sub(r"[^\w\-.]+", "_", s).strip("_")[:120]
 
-def md5_bytes(b: bytes) -> str:
-    return hashlib.md5(b).hexdigest()
+# md5_hex provided by archive_utils
 
 def sniff_file_type(data: bytes, fname: str) -> str:
     """Returns 'xml' | 'gz' | 'zip' | 'unknown'"""
@@ -173,13 +181,17 @@ async def upload_to_gcs(
     data: bytes,
     content_type: str = "application/octet-stream",
     md5_hex: str = None,
+    metadata: Optional[Dict[str, str]] = None,
 ):
     blob = bucket.blob(blob_path)
     blob.upload_from_string(data, content_type=content_type)
     
     # Set MD5 metadata if provided
+    meta = dict(metadata or {})
     if md5_hex:
-        blob.metadata = {"md5_hex": md5_hex}
+        meta.setdefault("md5_hex", md5_hex)
+    if meta:
+        blob.metadata = meta
         blob.patch()
 
 # ----------------------------
@@ -290,7 +302,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         patterns = retailer.get("download_patterns")
         links = await publishedprices_collect_links(page, patterns)
         result.links_found = len(links)
-        logger.info("publishedprices: links=%d", len(links))
+        logger.info("links.discovered slug=%s count=%d", retailer_id, len(links))
         
         # Step 4: Download and process files
         seen_hashes: Set[str] = set()
@@ -300,8 +312,10 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         for link in links:
             try:
                 # Download file
-                data = await fetch_url_bytes(page, link)
-                md5_hash = md5_bytes(data)
+                data, resp, filename = await fetch_url(page, link)
+                kind = sniff_file_type(data, filename)
+                md5_hash = md5_hex(data)
+                logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
                 # Check for duplicates
                 if md5_hash in seen_hashes:
@@ -309,7 +323,6 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                     continue
                 
                 # Normalize filename for name-based dedupe
-                filename = os.path.basename(urlparse(link).path)
                 normalized_name = f"{retailer_id}/{filename.lower()}"
                 if normalized_name in seen_names:
                     result.skipped_dupes += 1
@@ -322,8 +335,8 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 # Upload to GCS with new path structure
                 bucket = get_bucket()
                 if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{filename}"
-                    await upload_to_gcs(bucket, blob_path, data, md5_hex=md5_hash)
+                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
+                    await upload_to_gcs(bucket, blob_path, data, md5_hex=md5_hash, metadata={"source_filename": filename})
                     
                     # Add to manifest
                     manifest_entries.append({
@@ -336,9 +349,20 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                     
                     logger.info("upload.ok retailer=%s file=%s gcs_path=%s", retailer_id, filename, blob_path)
                 
-                # Parse XML if applicable
-                if filename.lower().endswith(('.xml', '.gz', '.zip')):
-                    await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                # Extract and optionally store normalized XML, then parse
+                xml_count = 0
+                for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
+                    xml_count += 1
+                    try:
+                        if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
+                            xml_md5 = md5_hex(xml_bytes)
+                            xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
+                            if bucket:
+                                await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
+                        await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                    except Exception as e:
+                        logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
+                logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename, xml_count)
                 
                 # Update counters
                 if filename.lower().endswith('.zip'):
@@ -493,7 +517,7 @@ async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]
         try:
             h_abs = await page.evaluate("u => new URL(u, location.href).href", h)
             low = h_abs.lower()
-            if low.endswith(suffixes) or "download" in low:
+            if looks_like_price_file(low) or low.endswith(suffixes) or "download" in low:
                 links.append(h_abs)
         except Exception:
             pass
@@ -525,7 +549,7 @@ async def collect_links_on_page(page, patterns: Optional[List[str]] = None) -> l
         if await page.locator(sel).count():
             vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
             for h in (vals or []):
-                if h and h.lower().endswith(tuple(pat)):
+                if h and (looks_like_price_file(h) or h.lower().endswith(tuple(pat))):
                     hrefs.add(h)
     
     return sorted(hrefs)
@@ -533,6 +557,46 @@ async def collect_links_on_page(page, patterns: Optional[List[str]] = None) -> l
 # ----------------------------
 # Adapters
 # ----------------------------
+
+
+async def bina_collect_links(page: Page) -> List[str]:
+    frame = page.frame(url=re.compile(r"/Main\.aspx", re.I)) or page.main_frame
+    for candidate in ["מחיר מלא", "Price Full", "PriceFull"]:
+        try:
+            await frame.get_by_text(candidate, exact=False).click(timeout=2000)
+            break
+        except Exception:
+            pass
+    for btn in ["חפש", "Search", "רענן"]:
+        try:
+            await frame.get_by_role("button", name=re.compile(btn, re.I)).click(timeout=1500)
+        except Exception:
+            pass
+    try:
+        await frame.wait_for_selector("a[href*='.zip'], a[href*='.gz'], a:has-text('Price')", timeout=6000)
+        hrefs = await frame.eval_on_selector_all(
+            "a",
+            "els => els.map(a => a.href).filter(u => u && (u.toLowerCase().includes('.zip') || u.toLowerCase().includes('.gz') || u.toLowerCase().includes('pricefull')))"
+        )
+        hrefs = list(dict.fromkeys(hrefs))
+        return hrefs
+    except Exception:
+        captured: Set[str] = set()
+        def _on_response(resp):
+            try:
+                url = (getattr(resp, "url", "") or "").lower()
+                if any(p in url for p in (".zip", ".gz", "pricefull")):
+                    captured.add(resp.url)
+            except Exception:
+                pass
+        page.on("response", _on_response)
+        for _ in range(3):
+            try:
+                await frame.locator("text=רענן").click(timeout=1000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(1000)
+        return list(captured)
 
 
 async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str], run_id: str) -> RetailerResult:
@@ -551,17 +615,20 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         # Additional wait for dynamic content
         await page.wait_for_timeout(2000)
         
-        # Collect download links
-        patterns = source.get("download_patterns") or source.get("patterns") or retailer_id and None
-        links = await collect_links_on_page(page, patterns)
+        # Collect download links via dedicated bina strategy with fallback
+        links = await collect_links_on_page(page, source.get("download_patterns") or source.get("patterns"))
+        if not links:
+            links = await bina_collect_links(page)
         result.links_found = len(links)
-        logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=bina links={len(links)}")
+        logger.info("links.discovered slug=%s count=%d", retailer_id, len(links))
         
         # Process each link
         for link in links:
             try:
-                data = await fetch_url_bytes(page, link)
-                md5_hash = md5_bytes(data)
+                data, resp, filename = await fetch_url(page, link)
+                kind = sniff_file_type(data, filename)
+                md5_hash = md5_hex(data)
+                logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
                 # Check for duplicates
                 if md5_hash in seen_hashes:
@@ -569,7 +636,6 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                     continue
                 
                 # Normalize filename for name-based dedupe
-                filename = os.path.basename(urlparse(link).path)
                 normalized_name = f"{retailer_id}/{filename.lower()}"
                 if normalized_name in seen_names:
                     result.skipped_dupes += 1
@@ -582,12 +648,23 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                 # Upload to GCS
                 bucket = get_bucket()
                 if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{filename}"
-                    await upload_to_gcs(bucket, blob_path, data)
+                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
+                    await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
-                # Parse XML if applicable
-                if filename.lower().endswith(('.xml', '.gz', '.zip')):
-                    await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                # Extract and (optionally) store normalized XML, then parse
+                xml_count = 0
+                for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
+                    xml_count += 1
+                    try:
+                        if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
+                            xml_md5 = md5_hex(xml_bytes)
+                            xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
+                            if bucket:
+                                await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
+                        await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                    except Exception as e:
+                        logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
+                logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename, xml_count)
                 
                 # Update counters
                 if filename.lower().endswith('.zip'):
@@ -640,13 +717,15 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
             await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
             logger.warning(f"[{retailer_id}] No links found at {page.url}. Saved screenshot: {fname}")
         
-        logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=generic links={len(links)}")
+        logger.info("links.discovered slug=%s count=%d", retailer_id, len(links))
         
         # Process each link
         for link in links:
             try:
-                data = await fetch_url_bytes(page, link)
-                md5_hash = md5_bytes(data)
+                data, resp, filename = await fetch_url(page, link)
+                kind = sniff_file_type(data, filename)
+                md5_hash = md5_hex(data)
+                logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
                 # Check for duplicates
                 if md5_hash in seen_hashes:
@@ -654,7 +733,6 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                     continue
                 
                 # Normalize filename for name-based dedupe
-                filename = os.path.basename(urlparse(link).path)
                 normalized_name = f"{retailer_id}/{filename.lower()}"
                 if normalized_name in seen_names:
                     result.skipped_dupes += 1
@@ -667,12 +745,23 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                 # Upload to GCS
                 bucket = get_bucket()
                 if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{filename}"
-                    await upload_to_gcs(bucket, blob_path, data)
+                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
+                    await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
-                # Parse XML if applicable
-                if filename.lower().endswith(('.xml', '.gz', '.zip')):
-                    await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                # Extract and (optionally) store normalized XML, then parse
+                xml_count = 0
+                for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
+                    xml_count += 1
+                    try:
+                        if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
+                            xml_md5 = md5_hex(xml_bytes)
+                            xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
+                            if bucket:
+                                await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
+                        await _maybe_parse_to_jsonl(retailer_id, filename, data)
+                    except Exception as e:
+                        logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
+                logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename, xml_count)
                 
                 # Update counters
                 if filename.lower().endswith('.zip'):
@@ -694,11 +783,33 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
 # Helper Functions
 # ----------------------------
 
-async def fetch_url_bytes(page: Page, url: str) -> bytes:
+def _resp_headers(resp) -> dict:
+    try:
+        h = resp.headers
+        if callable(h):
+            return h()
+        return h or {}
+    except Exception:
+        try:
+            return resp.headers() or {}
+        except Exception:
+            return {}
+
+def pick_filename(resp, fallback: str) -> str:
+    cd = _resp_headers(resp).get("content-disposition") or ""
+    m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?", cd, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return fallback
+
+async def fetch_url(page: Page, url: str) -> tuple[bytes, object, str]:
     resp = await page.request.get(url, timeout=90000)
     if not resp.ok:
         raise RuntimeError(f"download_failed status={resp.status}")
-    return await resp.body()
+    data = await resp.body()
+    fallback = os.path.basename(urlparse(url).path) or "download"
+    fname = pick_filename(resp, fallback)
+    return data, resp, fname
 
 async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
     """Parse XML to JSONL and save to GCS"""
