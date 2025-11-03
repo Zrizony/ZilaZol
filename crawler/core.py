@@ -19,6 +19,7 @@ from playwright.async_api import async_playwright, Page
 from google.cloud import storage
 
 from . import logger
+from .config import load_retailers_config
 
 # ----------------------------
 # Data Classes
@@ -61,15 +62,43 @@ SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
 MAX_LOGIN_RETRIES = int(os.getenv("MAX_RETRIES_LOGIN", "3"))
 
 
-# Load credentials from environment variable
-RAW_CREDS = os.getenv("RETAILER_CREDS_JSON", "{}")
-try:
-    CREDS = json.loads(RAW_CREDS)
-except Exception as e:
-    raise RuntimeError(f"Invalid RETAILER_CREDS_JSON: {e}")
+def _load_publishedprices_creds() -> Dict[str, dict]:
+    """Load PublishedPrices tenant credentials from data/retailers.json,
+    merged with RETAILER_CREDS_JSON env (env wins).
+    """
+    # Start with credentials found in retailers.json (if any)
+    cfg: Dict[str, any] = {}
+    try:
+        cfg = load_retailers_config()
+    except Exception:
+        cfg = {}
+
+    tenants_from_file: Dict[str, dict] = {}
+    auth_profiles = (cfg or {}).get("authProfiles", {})
+    for profile in auth_profiles.values():
+        # Only consider PublishedPrices-type profiles
+        if isinstance(profile, dict) and profile.get("type") == "publishedprices":
+            t = profile.get("tenants", {})
+            if isinstance(t, dict):
+                tenants_from_file.update(t)
+
+    # Merge with env-provided credentials (highest priority)
+    raw_env = os.getenv("RETAILER_CREDS_JSON", "{}")
+    env_creds: Dict[str, dict] = {}
+    if raw_env:
+        try:
+            env_creds = json.loads(raw_env) or {}
+        except Exception as e:
+            raise RuntimeError(f"Invalid RETAILER_CREDS_JSON: {e}")
+
+    merged: Dict[str, dict] = {**tenants_from_file, **env_creds}
+    return merged
+
+# Global credentials map used by adapters
+CREDS = _load_publishedprices_creds()
 
 PUBLISHED_HOST = "url.publishedprices.co.il"
-DOWNLOAD_SUFFIXES = (".xml", ".gz", ".zip")
+DEFAULT_DOWNLOAD_SUFFIXES = (".xml", ".gz", ".zip")
 
 # ----------------------------
 # Data Models
@@ -258,7 +287,8 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
             result.subpath = folder
         
         # Step 3: Collect files
-        links = await publishedprices_collect_links(page)
+        patterns = retailer.get("download_patterns")
+        links = await publishedprices_collect_links(page, patterns)
         result.links_found = len(links)
         logger.info("publishedprices: links=%d", len(links))
         
@@ -441,7 +471,7 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str):
     
     logger.error("folder.not_found retailer=publishedprices folder=%s", folder)
 
-async def publishedprices_collect_links(page: Page) -> List[str]:
+async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]] = None) -> List[str]:
     """Collect download links from publishedprices file manager"""
     # Wait for page to load
     await page.wait_for_load_state("domcontentloaded")
@@ -456,20 +486,21 @@ async def publishedprices_collect_links(page: Page) -> List[str]:
     
     # Normalize to absolute URLs and filter
     links = []
+    suffixes = tuple((p.lower() for p in (patterns or DEFAULT_DOWNLOAD_SUFFIXES)))
     for h in (hrefs or []):
         if not h:
             continue
         try:
             h_abs = await page.evaluate("u => new URL(u, location.href).href", h)
             low = h_abs.lower()
-            if low.endswith((".xml", ".gz", ".zip")) or "download" in low:
+            if low.endswith(suffixes) or "download" in low:
                 links.append(h_abs)
         except Exception:
             pass
     
     return sorted(set(links))
 
-async def collect_links_on_page(page) -> list[str]:
+async def collect_links_on_page(page, patterns: Optional[List[str]] = None) -> list[str]:
     """Collect download links with broader filters for generic sites"""
     # Expanded selectors for better link discovery
     selectors = [
@@ -483,13 +514,18 @@ async def collect_links_on_page(page) -> list[str]:
         "a[href*='.gz?' i]",
         "a[href*='.zip?' i]",
     ]
-    
+    # Build suffix selectors from patterns
+    pat = [p.lower() for p in (patterns or DEFAULT_DOWNLOAD_SUFFIXES)]
+    for p in pat:
+        selectors.append(f"a[href$='{p}' i]")
+        selectors.append(f"a[href*='{p}?' i]")
+
     hrefs = set()
     for sel in selectors:
         if await page.locator(sel).count():
             vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
             for h in (vals or []):
-                if h and h.lower().endswith(DOWNLOAD_SUFFIXES):
+                if h and h.lower().endswith(tuple(pat)):
                     hrefs.add(h)
     
     return sorted(hrefs)
@@ -516,7 +552,8 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         await page.wait_for_timeout(2000)
         
         # Collect download links
-        links = await collect_links_on_page(page)
+        patterns = source.get("download_patterns") or source.get("patterns") or retailer_id and None
+        links = await collect_links_on_page(page, patterns)
         result.links_found = len(links)
         logger.info(f"retailer={retailer_id} source={source.get('url')} adapter=bina links={len(links)}")
         
@@ -585,13 +622,14 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         await page.wait_for_timeout(2000)
         
         # Collect download links with retry logic
-        links = await collect_links_on_page(page)
+        patterns = source.get("download_patterns") or source.get("patterns") or None
+        links = await collect_links_on_page(page, patterns)
         
         # If no links found, retry with additional wait
         if not links:
             await page.wait_for_load_state("networkidle", timeout=8000)
             await page.wait_for_timeout(800)
-            links = await collect_links_on_page(page)
+            links = await collect_links_on_page(page, patterns)
         
         result.links_found = len(links)
         
