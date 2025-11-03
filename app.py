@@ -3,13 +3,18 @@ from __future__ import annotations
 import os
 import asyncio
 from flask import Flask, jsonify, request, current_app
+from google.cloud import storage
 
 from crawler.core import run_all
 from crawler import logger
+from version import VERSION
+from crawler.env import get_bucket
 from crawler.config import load_retailers_config
 
 app = Flask(__name__)
 
+logger.info("startup version=%s", VERSION)
+logger.info("bucket.config=%s", get_bucket() or "NONE")
 
 @app.get("/health")
 def health():
@@ -46,6 +51,7 @@ def run():
         payload = request.get_json() or {}
         retailer_filter = payload.get("retailer")
         dry_run = payload.get("dry_run", False)
+        logger.info("marker.run.enter retailer=%s", retailer_filter or "ALL")
         
         # Load retailer configuration
         cfg = load_retailers_config()
@@ -58,6 +64,8 @@ def run():
                 return jsonify({"status": "error", "error": f"Retailer '{retailer_filter}' not found"}), 404
         else:
             retailers = [r for r in all_retailers if r.get("enabled", True)]
+
+        logger.info("marker.discovery.summary retailers=%d", len(retailers))
         
         if dry_run:
             return jsonify({
@@ -74,7 +82,7 @@ def run():
         total_links = sum(r.get("links_found", 0) for r in results)
         total_errors = sum(len(r.get("errors", [])) for r in results)
         
-        return jsonify({
+        resp = {
             "status": "done",
             "retailers_processed": len(retailers),
             "results_count": len(results),
@@ -82,7 +90,9 @@ def run():
             "total_files_downloaded": total_files,
             "total_errors": total_errors,
             "results": results
-        }), 200
+        }
+        logger.info("marker.after_extract retailers=%d total_files=%d", len(retailers), total_files)
+        return jsonify(resp), 200
         
     except Exception as e:
         # Return 200 so Cloud Scheduler stops retrying forever
@@ -92,3 +102,45 @@ def run():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+
+# ---- Diagnostics Endpoints ----
+
+@app.route("/__version", methods=["GET"])
+def __version():
+    return jsonify({"version": VERSION})
+
+
+@app.route("/__env", methods=["GET"])
+def __env():
+    import os
+    visible = [
+        "GCS_BUCKET",
+        "PRICES_BUCKET",
+        "BUCKET_NAME",
+        "LOG_LEVEL",
+        "RELEASE",
+        "COMMIT_SHA",
+    ]
+    return jsonify({k: os.getenv(k) for k in visible})
+
+
+@app.route("/__smoke", methods=["POST"])
+def __smoke():
+    import time, hashlib
+    bkt_name = get_bucket()
+    if not bkt_name:
+        return jsonify(ok=False, error="No bucket configured (GCS_BUCKET/PRICES_BUCKET/BUCKET_NAME)."), 500
+    payload = f"ok:{time.time()}".encode()
+    md5 = hashlib.md5(payload).hexdigest()
+    key = f"smoke/{VERSION}/{md5}.txt"
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bkt_name)
+        blob = bucket.blob(key)
+        blob.metadata = {"md5_hex": md5}
+        blob.upload_from_string(payload, content_type="text/plain")
+        logger.info("smoke.uploaded bucket=%s key=%s", bkt_name, key)
+        return jsonify(ok=True, bucket=bkt_name, key=key)
+    except Exception as e:
+        current_app.logger.exception("smoke_failed")
+        return jsonify(ok=False, error=str(e)), 500

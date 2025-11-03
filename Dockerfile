@@ -1,4 +1,5 @@
 # Dockerfile
+ARG BUILD_NO_CACHE=0
 FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
 
 # Workdir
