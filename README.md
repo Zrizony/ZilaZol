@@ -22,7 +22,6 @@
 - `GET /retailers` - Debug retailer discovery
 
 ## Environment Variables
--
 
 ### Required
 - `GCS_BUCKET` - Google Cloud Storage bucket name (preferred)

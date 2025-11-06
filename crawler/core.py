@@ -20,7 +20,7 @@ from google.cloud import storage
 
 from . import logger
 from .config import load_retailers_config
-from .archive_utils import iter_xml_entries, sniff_format, md5_hex, iso_now
+from .archive_utils import iter_xml_entries, sniff_kind, md5_hex, iso_now
 import re
 
 # ----------------------------
@@ -104,10 +104,11 @@ DEFAULT_DOWNLOAD_SUFFIXES = (".xml", ".gz", ".zip")
 VALID_PATTERNS = (".xml", ".gz", ".zip")
 
 def looks_like_price_file(url: str) -> bool:
+    """Check if URL looks like a price file (hardened to catch mislabeled extensions)."""
     u = (url or "").lower()
     if any(p in u for p in VALID_PATTERNS):
         return True
-    return ("pricefull" in u) or ("price" in u)
+    return ("pricefull" in u) or ("promo" in u) or ("stores" in u) or ("price" in u)
 
 # ----------------------------
 # Data Models
@@ -139,25 +140,7 @@ class RetailerResult:
 def safe_name(s: str) -> str:
     return re.sub(r"[^\w\-.]+", "_", s).strip("_")[:120]
 
-# md5_hex provided by archive_utils
-
-def sniff_file_type(data: bytes, fname: str) -> str:
-    """Returns 'xml' | 'gz' | 'zip' | 'unknown'"""
-    lower = fname.lower()
-    if data.startswith(b"\x1f\x8b"):  # gzip
-        return "gz"
-    if data.startswith(b"PK"):        # zip
-        return "zip"
-    if lower.endswith(".xml"):
-        return "xml"
-    if lower.endswith(".gz"):
-        # mislabelled gz that is actually zip
-        if data.startswith(b"PK"):
-            return "zip"
-        return "gz"
-    if lower.endswith(".zip"):
-        return "zip"
-    return "unknown"
+# md5_hex and sniff_kind provided by archive_utils
 
 
 def ensure_dirs(*paths: str):
@@ -313,7 +296,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
             try:
                 # Download file
                 data, resp, filename = await fetch_url(page, link)
-                kind = sniff_file_type(data, filename)
+                kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
                 logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
@@ -812,46 +795,28 @@ async def fetch_url(page: Page, url: str) -> tuple[bytes, object, str]:
     return data, resp, fname
 
 async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
-    """Parse XML to JSONL and save to GCS"""
+    """Parse XML to JSONL and save to GCS using byte-sniffer (no extension assumptions)."""
     try:
-        # Use file-type sniffing instead of trusting extensions
-        ftype = sniff_file_type(data, filename)
-        xml_bytes: Optional[bytes] = None
-
-        if ftype == "xml":
-            xml_bytes = data
-        elif ftype == "gz":
+        xml_count = 0
+        for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
+            xml_count += 1
             try:
-                xml_bytes = gzip.decompress(data)
-            except Exception:
-                # if gz decompress fails, try treating as zip (just in case)
-                if data.startswith(b"PK"):
-                    ftype = "zip"
-                else:
-                    logger.warning(f"Failed to decompress gz: {filename}")
-                    return
-        elif ftype == "zip":
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    for n in z.namelist():
-                        if n.lower().endswith(".xml"):
-                            xml_bytes = z.read(n)
-                            break
-            except Exception:
-                logger.warning(f"Failed to read zip: {filename}")
-                return
-
-        if xml_bytes:
-            rows = parse_prices_xml(xml_bytes, company=retailer_id)
-            if rows:
-                # Save to GCS
-                bucket = get_bucket()
-                if bucket:
-                    jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
-                    blob_path = f"json/{retailer_id}/{os.path.splitext(filename)[0]}.jsonl"
-                    await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
+                rows = parse_prices_xml(xml_bytes, company=retailer_id)
+                if rows:
+                    # Save to GCS
+                    bucket = get_bucket()
+                    if bucket:
+                        jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+                        blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"
+                        await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
+            except Exception as e:
+                logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
     except Exception as e:
-        logger.warning(f"Failed to parse {filename}: {e}")
+        # Guard log for mislabeled files
+        if hasattr(e, "__class__") and e.__class__.__name__ in ("BadGzipFile", "OSError", "gzip.BadGzipFile"):
+            if data[:2] == b"PK":
+                logger.warning("gzip_mislabel_detected file=%s note='starts with PK -> zip' -- rerouting to extractor", filename)
+        logger.warning("Failed to parse %s: %s", filename, e)
 
 # ----------------------------
 # Main Crawl Logic
