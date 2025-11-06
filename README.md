@@ -18,7 +18,10 @@
 ## HTTP Endpoints
 - `POST /run` - Trigger crawler (supports JSON payload)
 - `GET /health` - Health check
-- `GET /version` - Version info
+- `GET /version` - Version info (legacy)
+- `GET /__version` - Active version (RELEASE/COMMIT_SHA)
+- `GET /__env` - Environment variables (non-sensitive)
+- `POST /__smoke` - GCS smoke test (uploads test file to bucket)
 - `GET /retailers` - Debug retailer discovery
 
 ## Environment Variables
@@ -85,6 +88,66 @@ curl -X POST http://localhost:8080/run \
   -H "Content-Type: application/json" \
   -d '{"dry_run":true}'
 ```
+
+## Deployment
+
+### Automatic Deployment (GitHub → Cloud Build → Cloud Run)
+
+Each commit to `main` triggers a Cloud Build that:
+1. Builds Docker image tagged with `$COMMIT_SHA`
+2. Pushes to `gcr.io/$PROJECT_ID/zilazol:$COMMIT_SHA`
+3. Deploys to Cloud Run with 100% traffic
+4. Sets `RELEASE=$COMMIT_SHA` and `GCS_BUCKET=civic-ripsaw-466109-e2-crawler-data`
+
+### Manual Deployment
+
+Deploy manually with a unique tag:
+
+```bash
+chmod +x scripts/*.sh
+./scripts/deploy.sh
+```
+
+This will:
+- Build and push image with timestamp tag
+- Deploy to Cloud Run service `price-crawler` in `me-west1`
+- Set environment variables automatically
+
+### Verification
+
+Verify the deployed service:
+
+```bash
+./scripts/verify.sh
+```
+
+This checks:
+- `/__version` → Returns the release/tag you just deployed
+- `/__env` → Shows `GCS_BUCKET=civic-ripsaw-466109-e2-crawler-data`
+- `/__smoke` → Returns `ok:true` and creates a GCS object at `smoke/<version>/...`
+
+**Expected output:**
+- `/__version` shows the deployed tag
+- `/__env` shows `GCS_BUCKET` set correctly
+- `/__smoke` returns `{"ok": true, "bucket": "...", "key": "smoke/.../..."}`
+
+**Cloud Run Logs** should show:
+- `startup version=<tag>`
+- `bucket.config=civic-ripsaw-466109-e2-crawler-data`
+- `smoke.uploaded bucket=... key=...`
+
+### Cloud Scheduler Configuration
+
+Ensure your Cloud Scheduler job's Target URL matches the Cloud Run service URL:
+
+```bash
+# Get the service URL
+gcloud run services describe price-crawler \
+  --region me-west1 \
+  --format='value(status.url)'
+```
+
+Update the Scheduler job to use this URL for the `/run` endpoint.
 
 ## GCS Layout
 
