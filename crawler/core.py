@@ -13,7 +13,6 @@ from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
 
 import aiofiles
-import gzip
 import zipfile
 from playwright.async_api import async_playwright, Page
 from google.cloud import storage
@@ -191,6 +190,7 @@ def _first_text(elem, *paths) -> Optional[str]:
     return None
 
 def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
+    """Parse XML bytes into price item rows (PriceFull, PromoFull, StoresFull, generic)."""
     rows: List[dict] = []
     try:
         root = etree.fromstring(xml_bytes)
@@ -231,6 +231,41 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
             }
         )
     return rows
+
+
+async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run_id: str) -> int:
+    """
+    Unified parse function for all blob types (PriceFull, PromoFull, StoresFull, generic).
+    Logs file.downloaded with sniffed kind, extracts XMLs, parses, and logs file.processed.
+    Returns count of XML entries processed.
+    """
+    kind = sniff_kind(data)
+    logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename_hint, kind, len(data))
+    
+    xml_count = 0
+    bucket = get_bucket()
+    
+    for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename_hint):
+        xml_count += 1
+        try:
+            # Optional: store normalized XML
+            if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
+                xml_md5 = md5_hex(xml_bytes)
+                xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
+                if bucket:
+                    await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
+            
+            # Parse XML to JSONL
+            rows = parse_prices_xml(xml_bytes, company=retailer_id)
+            if rows and bucket:
+                jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+                blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"
+                await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
+        except Exception as e:
+            logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename_hint, inner_name, e)
+    
+    logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename_hint, xml_count)
+    return xml_count
 
 # ----------------------------
 # Playwright Actions
@@ -298,7 +333,6 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 data, resp, filename = await fetch_url(page, link)
                 kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
-                logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
                 # Check for duplicates
                 if md5_hash in seen_hashes:
@@ -332,25 +366,13 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                     
                     logger.info("upload.ok retailer=%s file=%s gcs_path=%s", retailer_id, filename, blob_path)
                 
-                # Extract and optionally store normalized XML, then parse
-                xml_count = 0
-                for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
-                    xml_count += 1
-                    try:
-                        if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
-                            xml_md5 = md5_hex(xml_bytes)
-                            xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
-                            if bucket:
-                                await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
-                        await _maybe_parse_to_jsonl(retailer_id, filename, data)
-                    except Exception as e:
-                        logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
-                logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename, xml_count)
+                # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
+                await parse_from_blob(data, filename, retailer_id, run_id)
                 
-                # Update counters
-                if filename.lower().endswith('.zip'):
+                # Update counters based on sniffed kind (not filename extension)
+                if kind == "zip":
                     result.zips += 1
-                if filename.lower().endswith('.gz'):
+                elif kind == "gz":
                     result.gz += 1
                 result.files_downloaded += 1
                 
@@ -609,9 +631,8 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         for link in links:
             try:
                 data, resp, filename = await fetch_url(page, link)
-                kind = sniff_file_type(data, filename)
+                kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
-                logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
                 # Check for duplicates
                 if md5_hash in seen_hashes:
@@ -634,25 +655,13 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                     blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
                     await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
-                # Extract and (optionally) store normalized XML, then parse
-                xml_count = 0
-                for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
-                    xml_count += 1
-                    try:
-                        if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
-                            xml_md5 = md5_hex(xml_bytes)
-                            xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
-                            if bucket:
-                                await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
-                        await _maybe_parse_to_jsonl(retailer_id, filename, data)
-                    except Exception as e:
-                        logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
-                logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename, xml_count)
+                # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
+                await parse_from_blob(data, filename, retailer_id, run_id)
                 
-                # Update counters
-                if filename.lower().endswith('.zip'):
+                # Update counters based on sniffed kind (not filename extension)
+                if kind == "zip":
                     result.zips += 1
-                if filename.lower().endswith('.gz'):
+                elif kind == "gz":
                     result.gz += 1
                 result.files_downloaded += 1
                 
@@ -706,9 +715,8 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         for link in links:
             try:
                 data, resp, filename = await fetch_url(page, link)
-                kind = sniff_file_type(data, filename)
+                kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
-                logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename, kind, len(data))
                 
                 # Check for duplicates
                 if md5_hash in seen_hashes:
@@ -731,25 +739,13 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                     blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
                     await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
-                # Extract and (optionally) store normalized XML, then parse
-                xml_count = 0
-                for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
-                    xml_count += 1
-                    try:
-                        if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
-                            xml_md5 = md5_hex(xml_bytes)
-                            xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
-                            if bucket:
-                                await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
-                        await _maybe_parse_to_jsonl(retailer_id, filename, data)
-                    except Exception as e:
-                        logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
-                logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename, xml_count)
+                # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
+                await parse_from_blob(data, filename, retailer_id, run_id)
                 
-                # Update counters
-                if filename.lower().endswith('.zip'):
+                # Update counters based on sniffed kind (not filename extension)
+                if kind == "zip":
                     result.zips += 1
-                if filename.lower().endswith('.gz'):
+                elif kind == "gz":
                     result.gz += 1
                 result.files_downloaded += 1
                 
@@ -794,26 +790,13 @@ async def fetch_url(page: Page, url: str) -> tuple[bytes, object, str]:
     fname = pick_filename(resp, fallback)
     return data, resp, fname
 
-async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes):
-    """Parse XML to JSONL and save to GCS using byte-sniffer (no extension assumptions)."""
+async def _maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes, run_id: str = ""):
+    """Legacy wrapper - routes to unified parse_from_blob."""
     try:
-        xml_count = 0
-        for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename):
-            xml_count += 1
-            try:
-                rows = parse_prices_xml(xml_bytes, company=retailer_id)
-                if rows:
-                    # Save to GCS
-                    bucket = get_bucket()
-                    if bucket:
-                        jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
-                        blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"
-                        await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
-            except Exception as e:
-                logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename, inner_name, e)
+        await parse_from_blob(data, filename, retailer_id, run_id)
     except Exception as e:
         # Guard log for mislabeled files
-        if hasattr(e, "__class__") and e.__class__.__name__ in ("BadGzipFile", "OSError", "gzip.BadGzipFile"):
+        if hasattr(e, "__class__") and ("BadGzipFile" in str(e.__class__) or e.__class__.__name__ in ("BadGzipFile", "OSError")):
             if data[:2] == b"PK":
                 logger.warning("gzip_mislabel_detected file=%s note='starts with PK -> zip' -- rerouting to extractor", filename)
         logger.warning("Failed to parse %s: %s", filename, e)
