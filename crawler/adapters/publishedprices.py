@@ -186,6 +186,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         bucket = get_bucket()
         
         for link in links:
+            filename = link.split('/')[-1] or link  # Fallback for error logging
             try:
                 # Download file
                 data, resp, filename = await fetch_url(page, link)
@@ -234,8 +235,8 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 result.files_downloaded += 1
                 
             except Exception as e:
-                result.errors.append(f"download_error:{e}")
-                logger.error("upload.failed retailer=%s file=%s err=%s", retailer_id, filename, str(e))
+                result.errors.append(f"download_error:{link}:{e}")
+                logger.error("upload.failed retailer=%s link=%s file=%s err=%s", retailer_id, link, filename, str(e))
                 continue
         
         # Write manifest.json

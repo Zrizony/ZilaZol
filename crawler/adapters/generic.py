@@ -58,6 +58,7 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         # Process each link
         bucket = get_bucket()
         for link in links:
+            filename = link.split('/')[-1] or link  # Fallback for error logging
             try:
                 data, resp, filename = await fetch_url(page, link)
                 kind = sniff_kind(data)
@@ -94,7 +95,8 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                 result.files_downloaded += 1
                 
             except Exception as e:
-                result.errors.append(f"download_error:{e}")
+                result.errors.append(f"download_error:{link}:{e}")
+                logger.error("download.failed retailer=%s link=%s file=%s err=%s", retailer_id, link, filename, str(e))
                 continue
                 
     except Exception as e:
