@@ -12,7 +12,7 @@ from .constants import BUCKET, PUBLISHED_HOST
 from .credentials import CREDS
 from .models import RetailerResult
 from .playwright_helpers import new_context
-from .adapters import crawl_publishedprices, bina_adapter, generic_adapter
+from .adapters import crawl_publishedprices, bina_adapter, generic_adapter, wolt_dateindex_adapter
 
 
 async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
@@ -51,14 +51,18 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                 if not source_url:
                     continue
 
-                # Determine adapter based on host/type
-                host = source.get("host", "").lower()
-                adapter_type = "generic"
+                # Determine adapter based on explicit config or host/type
+                adapter_type = source.get("adapter") or retailer.get("adapter")
                 
-                if PUBLISHED_HOST in host or "publishedprices" in host:
-                    adapter_type = "publishedprices"
-                elif "binaprojects" in host:
-                    adapter_type = "bina"
+                if not adapter_type:
+                    # Auto-detect based on host
+                    host = source.get("host", "").lower()
+                    if PUBLISHED_HOST in host or "publishedprices" in host:
+                        adapter_type = "publishedprices"
+                    elif "binaprojects" in host:
+                        adapter_type = "bina"
+                    else:
+                        adapter_type = "generic"
                 
                 # Run appropriate adapter
                 if adapter_type == "publishedprices":
@@ -79,6 +83,8 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                         result = await crawl_publishedprices(page, retailer, credentials, run_id)
                 elif adapter_type == "bina":
                     result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
+                elif adapter_type == "wolt_dateindex":
+                    result = await wolt_dateindex_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 else:
                     result = await generic_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 

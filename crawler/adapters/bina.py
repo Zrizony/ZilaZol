@@ -93,7 +93,8 @@ async def bina_fallback_click_downloads(
     seen_names: Set[str], 
     run_id: str,
     result: RetailerResult,
-    max_files: int = 60
+    max_files: int = 60,
+    throttle_ms: int = 200
 ) -> int:
     """Fallback: click export/download buttons and capture downloads via expect_download()."""
     # Look for export/download buttons
@@ -165,6 +166,10 @@ async def bina_fallback_click_downloads(
             
             total += 1
             
+            # Throttle between clicks
+            if throttle_ms and i < n - 1:
+                await asyncio.sleep(throttle_ms / 1000)
+            
         except Exception as e:
             logger.warning("click_download.failed retailer=%s idx=%d err=%s", retailer_id, i, str(e))
     
@@ -198,16 +203,19 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         # Fallback: click-to-download if no links found
         if result.links_found == 0:
             result.reasons.append("no_dom_links")
+            logger.info("discovery retailer=%s adapter=bina path=click trigger", retailer_id)
+            
             frame = await bina_get_content_frame(page)
-            await bina_open_tab(frame, tab_hint="PriceFull")
-            got = await bina_fallback_click_downloads(page, frame, retailer_id, seen_hashes, seen_names, run_id, result)
-            if got == 0:
-                # Try other tabs
-                for tab in ["Promo", "Stores"]:
-                    await bina_open_tab(frame, tab)
-                    got += await bina_fallback_click_downloads(page, frame, retailer_id, seen_hashes, seen_names, run_id, result)
-                    if got > 0:
-                        break
+            got = 0
+            
+            # Try tabs in order; stop if we get downloads
+            for tab in ["PriceFull", "Promo", "Stores"]:
+                await bina_open_tab(frame, tab)
+                tab_downloads = await bina_fallback_click_downloads(page, frame, retailer_id, seen_hashes, seen_names, run_id, result, max_files=30, throttle_ms=200)
+                got += tab_downloads
+                if tab_downloads > 0:
+                    break
+            
             if got > 0:
                 result.reasons.append("used_click_fallback")
             result.files_downloaded += got

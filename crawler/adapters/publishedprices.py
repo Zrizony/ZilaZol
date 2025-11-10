@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
+from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Page
 
@@ -14,6 +15,34 @@ from ..download import fetch_url
 from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
 from ..utils import looks_like_price_file
+
+
+def _normalize_dl_link(base_url: str, href: str) -> Optional[str]:
+    """Normalize download link, drop anchors, make absolute, filter non-files."""
+    if not href:
+        return None
+    
+    # Drop fragment-only or anchors like "#", "file#"
+    if href.startswith("#") or href.startswith("file#"):
+        return None
+    
+    # Make absolute
+    abs_url = urljoin(base_url, href)
+    
+    # Only keep actual file candidates
+    p = urlparse(abs_url)
+    if not p.scheme.startswith("http"):
+        return None
+    
+    # Remove fragment
+    abs_url = abs_url.split("#")[0]
+    
+    # Must contain .zip or .gz somewhere in the URL
+    low = abs_url.lower()
+    if not (low.endswith(".zip") or low.endswith(".gz") or ".zip" in low or ".gz" in low):
+        return None
+    
+    return abs_url
 
 
 async def publishedprices_login(page: Page, username: str, password: str) -> bool:
@@ -62,7 +91,7 @@ async def publishedprices_login(page: Page, username: str, password: str) -> boo
         return False
 
 
-async def publishedprices_navigate_to_folder(page: Page, folder: str) -> bool:
+async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_id: str = "unknown") -> bool:
     """Navigate to specific folder with robust waits and retries. Returns True if successful."""
     logger.info("folder.navigate retailer=publishedprices folder=%s", folder)
     
@@ -78,7 +107,7 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str) -> bool:
             await page.wait_for_timeout(1000)
             
             # Check if we have files listed
-            links = await publishedprices_collect_links(page)
+            links = await publishedprices_collect_links(page, retailer_id=retailer_id)
             if links:
                 logger.info("folder.navigate retailer=publishedprices folder=%s ok=true method=direct", folder)
                 return True
@@ -108,7 +137,7 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str) -> bool:
                         await page.wait_for_load_state("networkidle", timeout=10000)
                         
                         # Verify we're in the folder by checking for files
-                        links = await publishedprices_collect_links(page)
+                        links = await publishedprices_collect_links(page, retailer_id=retailer_id)
                         if links:
                             logger.info("folder.navigate retailer=publishedprices folder=%s ok=true method=click attempt=%d", folder, attempt + 1)
                             return True
@@ -125,8 +154,8 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str) -> bool:
         return False
 
 
-async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]] = None) -> List[str]:
-    """Collect download links from publishedprices file manager"""
+async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]] = None, retailer_id: str = "unknown") -> List[str]:
+    """Collect download links from publishedprices file manager with normalization"""
     # Wait for page to load
     await page.wait_for_load_state("domcontentloaded")
     await page.wait_for_load_state("networkidle")
@@ -139,18 +168,24 @@ async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]
     )
     
     # Normalize to absolute URLs and filter
+    base_url = page.url
     links = []
-    suffixes = tuple((p.lower() for p in (patterns or DEFAULT_DOWNLOAD_SUFFIXES)))
+    skipped = 0
+    
     for h in (hrefs or []):
         if not h:
             continue
-        try:
-            h_abs = await page.evaluate("u => new URL(u, location.href).href", h)
-            low = h_abs.lower()
-            if looks_like_price_file(low) or low.endswith(suffixes) or "download" in low:
-                links.append(h_abs)
-        except Exception:
-            pass
+        
+        # Normalize link (drops anchors, makes absolute, filters non-files)
+        normalized = _normalize_dl_link(base_url, h)
+        if not normalized:
+            skipped += 1
+            continue
+        
+        links.append(normalized)
+    
+    if skipped > 0:
+        logger.debug("publishedprices: skip_href retailer=%s skipped=%d", retailer_id, skipped)
     
     return sorted(set(links))
 
@@ -184,7 +219,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         # Step 2: Handle folder navigation (Super Yuda special case)
         folder = retailer.get("folder")
         if folder:
-            folder_ok = await publishedprices_navigate_to_folder(page, folder)
+            folder_ok = await publishedprices_navigate_to_folder(page, folder, retailer_id)
             result.subpath = folder
             if not folder_ok:
                 result.reasons.append("folder_navigation_failed")
@@ -192,7 +227,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         
         # Step 3: Collect files
         patterns = retailer.get("download_patterns")
-        links = await publishedprices_collect_links(page, patterns)
+        links = await publishedprices_collect_links(page, patterns, retailer_id)
         result.links_found = len(links)
         logger.info("links.discovered slug=%s adapter=publishedprices count=%d", retailer_id, len(links))
         

@@ -84,8 +84,10 @@
       "name": "וולט אופריישנס סרוויסס ישראל בע\"מ",
       "url": "https://wm-gateway.wolt.com/isr-prices/public/v1/index.html",
       "host": "wolt.com",
+      "adapter": "wolt_dateindex",
       "enabled": true,
-      "tags": ["public", "no-login"],
+      "max_files": 80,
+      "tags": ["public", "no-login", "date_index"],
       "download_patterns": [".xml", ".gz", ".zip"]
     },
     {
