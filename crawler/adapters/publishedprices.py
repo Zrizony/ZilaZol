@@ -45,9 +45,9 @@ def _normalize_dl_link(base_url: str, href: str) -> Optional[str]:
     return abs_url
 
 
-async def publishedprices_login(page: Page, username: str, password: str) -> bool:
+async def publishedprices_login(page: Page, username: str, password: str, retailer_id: str = "unknown") -> bool:
     """Login to publishedprices with robust selector handling and explicit waits. Returns True if successful."""
-    logger.info("login.start retailer=publishedprices username=%s", username)
+    logger.info("login.start retailer=%s adapter=publishedprices username=%s", retailer_id, username)
     
     try:
         await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=90000)
@@ -77,23 +77,23 @@ async def publishedprices_login(page: Page, username: str, password: str) -> boo
         try:
             # Wait for URL change or file manager elements
             await page.wait_for_url("**/file**", timeout=25000)
-            logger.info("login.success retailer=publishedprices logged_in=true")
+            logger.info("login.success retailer=%s adapter=publishedprices logged_in=true", retailer_id)
             return True
         except:
             # Fallback: navigate to file page and wait for file manager
             await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=25000)
             # Wait for file manager to load
             await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
-            logger.info("login.success retailer=publishedprices logged_in=true method=fallback")
+            logger.info("login.success retailer=%s adapter=publishedprices logged_in=true method=fallback", retailer_id)
             return True
     except Exception as e:
-        logger.error("login.failed retailer=publishedprices username=%s error=%s", username, str(e))
+        logger.error("login.failed retailer=%s adapter=publishedprices username=%s error=%s", retailer_id, username, str(e))
         return False
 
 
 async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_id: str = "unknown") -> bool:
     """Navigate to specific folder with robust waits and retries. Returns True if successful."""
-    logger.info("folder.navigate retailer=publishedprices folder=%s", folder)
+    logger.info("folder.navigate retailer=%s adapter=publishedprices folder=%s", retailer_id, folder)
     
     try:
         # Wait for file/folder tree to render
@@ -109,10 +109,10 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_i
             # Check if we have files listed
             links = await publishedprices_collect_links(page, retailer_id=retailer_id)
             if links:
-                logger.info("folder.navigate retailer=publishedprices folder=%s ok=true method=direct", folder)
+                logger.info("folder.navigate retailer=%s adapter=publishedprices folder=%s ok=true method=direct", retailer_id, folder)
                 return True
         except Exception as e:
-            logger.warning("folder.navigate.direct_failed retailer=publishedprices folder=%s error=%s", folder, str(e))
+            logger.warning("folder.navigate.direct_failed retailer=%s adapter=publishedprices folder=%s error=%s", retailer_id, folder, str(e))
         
         # Fallback: go to /file and click the folder
         await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=30000)
@@ -139,18 +139,18 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_i
                         # Verify we're in the folder by checking for files
                         links = await publishedprices_collect_links(page, retailer_id=retailer_id)
                         if links:
-                            logger.info("folder.navigate retailer=publishedprices folder=%s ok=true method=click attempt=%d", folder, attempt + 1)
+                            logger.info("folder.navigate retailer=%s adapter=publishedprices folder=%s ok=true method=click attempt=%d", retailer_id, folder, attempt + 1)
                             return True
                         break
             except Exception as e:
-                logger.warning("folder.navigate.click_failed retailer=publishedprices folder=%s attempt=%d error=%s", folder, attempt + 1, str(e))
+                logger.warning("folder.navigate.click_failed retailer=%s adapter=publishedprices folder=%s attempt=%d error=%s", retailer_id, folder, attempt + 1, str(e))
                 if attempt == 0:
                     await page.wait_for_timeout(2000)  # Wait before retry
         
-        logger.error("folder.navigate retailer=publishedprices folder=%s ok=false", folder)
+        logger.error("folder.navigate retailer=%s adapter=publishedprices folder=%s ok=false", retailer_id, folder)
         return False
     except Exception as e:
-        logger.error("folder.navigate retailer=publishedprices folder=%s ok=false error=%s", folder, str(e))
+        logger.error("folder.navigate retailer=%s adapter=publishedprices folder=%s ok=false error=%s", retailer_id, folder, str(e))
         return False
 
 
@@ -206,11 +206,11 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         adapter="publishedprices"
     )
     
-    logger.info("publishedprices: retailer=%s", retailer_name)
+    logger.info("adapter=publishedprices retailer=%s name=%s", retailer_id, retailer_name)
     
     try:
         # Step 1: Login
-        login_ok = await publishedprices_login(page, creds["username"], creds.get("password", ""))
+        login_ok = await publishedprices_login(page, creds["username"], creds.get("password", ""), retailer_id)
         if not login_ok:
             result.errors.append("login_failed")
             result.reasons.append("login_failed")
@@ -313,7 +313,7 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 
     except Exception as e:
         result.errors.append(f"fatal:{e}")
-        logger.error(f"publishedprices error for {retailer_name}: {e}")
+        logger.error("adapter=publishedprices retailer=%s error=%s", retailer_id, str(e))
     
     return result
 

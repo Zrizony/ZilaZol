@@ -32,10 +32,10 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
             logger.warning(f"No sources found for retailer {retailer_id}")
             return []
     
-    # Sort by priority
-    sources.sort(key=lambda s: s.get("priority", 999))
+    # Sort by priority (descending - higher priority first)
+    sources.sort(key=lambda s: s.get("priority", 0), reverse=True)
     
-    # Deduplication sets (per retailer)
+    # Deduplication sets (per retailer, shared across sources)
     seen_hashes: Set[str] = set()
     seen_names: Set[str] = set()
     
@@ -94,6 +94,13 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                 logger.info(f"retailer={retailer_id} source={source_url} adapter={adapter_type} "
                           f"links={result.links_found} downloaded={result.files_downloaded} "
                           f"skipped_dupe={result.skipped_dupes}")
+                
+                # Short-circuit: if this source downloaded files, stop trying other sources
+                if result.files_downloaded > 0:
+                    logger.info("source.chosen retailer=%s url=%s downloaded=%d", retailer_id, source_url, result.files_downloaded)
+                    break
+                else:
+                    logger.info("source.skipped retailer=%s url=%s reason=no_downloads", retailer_id, source_url)
                 
         finally:
             await ctx.close()

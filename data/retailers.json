@@ -207,14 +207,16 @@
         {
           "url": "https://citymarketkiryatgat.binaprojects.com/Main.aspx",
           "host": "binaprojects.com",
+          "adapter": "bina",
           "tags": ["bina", "no-login"],
-          "priority": 1
+          "priority": 10
         },
         {
           "url": "https://www.citymarket-shops.co.il/?d=2024-08-18",
           "host": "citymarket-shops.co.il",
+          "adapter": "generic",
           "tags": ["public", "no-login"],
-          "priority": 2
+          "priority": 1
         }
       ]
     },
@@ -293,14 +295,16 @@
         {
           "url": "https://ktshivuk.binaprojects.com/Main.aspx",
           "host": "binaprojects.com",
+          "adapter": "bina",
           "tags": ["bina", "no-login"],
-          "priority": 1
+          "priority": 10
         },
         {
           "url": "https://chp-kt.pages.dev/",
           "host": "pages.dev",
+          "adapter": "generic",
           "tags": ["public", "no-login"],
-          "priority": 2
+          "priority": 1
         }
       ]
     },
