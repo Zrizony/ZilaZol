@@ -84,8 +84,10 @@
       "name": "וולט אופריישנס סרוויסס ישראל בע\"מ",
       "url": "https://wm-gateway.wolt.com/isr-prices/public/v1/index.html",
       "host": "wolt.com",
+      "adapter": "wolt_dateindex",
       "enabled": true,
-      "tags": ["public", "no-login"],
+      "max_files": 80,
+      "tags": ["public", "no-login", "date_index"],
       "download_patterns": [".xml", ".gz", ".zip"]
     },
     {
@@ -205,14 +207,16 @@
         {
           "url": "https://citymarketkiryatgat.binaprojects.com/Main.aspx",
           "host": "binaprojects.com",
+          "adapter": "bina",
           "tags": ["bina", "no-login"],
-          "priority": 1
+          "priority": 10
         },
         {
           "url": "https://www.citymarket-shops.co.il/?d=2024-08-18",
           "host": "citymarket-shops.co.il",
+          "adapter": "generic",
           "tags": ["public", "no-login"],
-          "priority": 2
+          "priority": 1
         }
       ]
     },
@@ -291,14 +295,16 @@
         {
           "url": "https://ktshivuk.binaprojects.com/Main.aspx",
           "host": "binaprojects.com",
+          "adapter": "bina",
           "tags": ["bina", "no-login"],
-          "priority": 1
+          "priority": 10
         },
         {
           "url": "https://chp-kt.pages.dev/",
           "host": "pages.dev",
+          "adapter": "generic",
           "tags": ["public", "no-login"],
-          "priority": 2
+          "priority": 1
         }
       ]
     },

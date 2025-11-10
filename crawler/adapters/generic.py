@@ -47,13 +47,14 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         
         # If still no links, take screenshot and log
         if not links:
+            result.reasons.append("no_dom_links")
             ensure_dirs(SCREENSHOTS_DIR)
             ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             fname = f"{retailer_id}_generic_no_links_{ts}.png"
             await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, fname), full_page=True)
             logger.warning(f"[{retailer_id}] No links found at {page.url}. Saved screenshot: {fname}")
         
-        logger.info("links.discovered slug=%s count=%d", retailer_id, len(links))
+        logger.info("links.discovered slug=%s adapter=generic count=%d", retailer_id, len(links))
         
         # Process each link
         bucket = get_bucket()

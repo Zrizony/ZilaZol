@@ -64,6 +64,11 @@ def run():
                 return jsonify({"status": "error", "error": f"Retailer '{retailer_filter}' not found"}), 404
         else:
             retailers = [r for r in all_retailers if r.get("enabled", True)]
+            # Log disabled retailers
+            disabled = [r for r in all_retailers if not r.get("enabled", True)]
+            for d in disabled:
+                reason = d.get("disabled_reason", "no_reason_specified")
+                logger.info("retailer=%s disabled reason=%s", d.get("id", "unknown"), reason)
 
         logger.info("marker.discovery.summary retailers=%d", len(retailers))
         

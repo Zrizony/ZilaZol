@@ -12,7 +12,7 @@ from .constants import BUCKET, PUBLISHED_HOST
 from .credentials import CREDS
 from .models import RetailerResult
 from .playwright_helpers import new_context
-from .adapters import crawl_publishedprices, bina_adapter, generic_adapter
+from .adapters import crawl_publishedprices, bina_adapter, generic_adapter, wolt_dateindex_adapter
 
 
 async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
@@ -32,10 +32,10 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
             logger.warning(f"No sources found for retailer {retailer_id}")
             return []
     
-    # Sort by priority
-    sources.sort(key=lambda s: s.get("priority", 999))
+    # Sort by priority (descending - higher priority first)
+    sources.sort(key=lambda s: s.get("priority", 0), reverse=True)
     
-    # Deduplication sets (per retailer)
+    # Deduplication sets (per retailer, shared across sources)
     seen_hashes: Set[str] = set()
     seen_names: Set[str] = set()
     
@@ -51,14 +51,18 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                 if not source_url:
                     continue
 
-                # Determine adapter based on host/type
-                host = source.get("host", "").lower()
-                adapter_type = "generic"
+                # Determine adapter based on explicit config or host/type
+                adapter_type = source.get("adapter") or retailer.get("adapter")
                 
-                if PUBLISHED_HOST in host or "publishedprices" in host:
-                    adapter_type = "publishedprices"
-                elif "binaprojects" in host:
-                    adapter_type = "bina"
+                if not adapter_type:
+                    # Auto-detect based on host
+                    host = source.get("host", "").lower()
+                    if PUBLISHED_HOST in host or "publishedprices" in host:
+                        adapter_type = "publishedprices"
+                    elif "binaprojects" in host:
+                        adapter_type = "bina"
+                    else:
+                        adapter_type = "generic"
                 
                 # Run appropriate adapter
                 if adapter_type == "publishedprices":
@@ -71,13 +75,16 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                             retailer_id=retailer_id,
                             source_url=source_url,
                             errors=[error_msg],
-                            adapter="publishedprices"
+                            adapter="publishedprices",
+                            reasons=["credentials_missing"]
                         )
                     else:
                         credentials = CREDS[creds_key]
                         result = await crawl_publishedprices(page, retailer, credentials, run_id)
                 elif adapter_type == "bina":
                     result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
+                elif adapter_type == "wolt_dateindex":
+                    result = await wolt_dateindex_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 else:
                     result = await generic_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 
@@ -87,6 +94,13 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                 logger.info(f"retailer={retailer_id} source={source_url} adapter={adapter_type} "
                           f"links={result.links_found} downloaded={result.files_downloaded} "
                           f"skipped_dupe={result.skipped_dupes}")
+                
+                # Short-circuit: if this source downloaded files, stop trying other sources
+                if result.files_downloaded > 0:
+                    logger.info("source.chosen retailer=%s url=%s downloaded=%d", retailer_id, source_url, result.files_downloaded)
+                    break
+                else:
+                    logger.info("source.skipped retailer=%s url=%s reason=no_downloads", retailer_id, source_url)
                 
         finally:
             await ctx.close()
@@ -99,6 +113,7 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     """Run all retailers concurrently"""
     # Generate run ID for this execution
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid.uuid4())[:8]
+    started_at = datetime.now(timezone.utc).isoformat()
     logger.info("run.start run_id=%s retailers=%d", run_id, len(retailers))
     
     # Warn if BUCKET is missing
@@ -113,11 +128,64 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     out: List[dict] = []
+    manifest_retailers = []
+    
     for retailer_results in results:
         if isinstance(retailer_results, Exception):
-            out.append({"error": str(retailer_results)})
+            error_entry = {"error": str(retailer_results)}
+            out.append(error_entry)
+            manifest_retailers.append({
+                "slug": "unknown",
+                "adapter": "unknown",
+                "source": "",
+                "links": 0,
+                "downloads": 0,
+                "skipped_dupes": 0,
+                "reasons": ["exception"],
+                "error": str(retailer_results)
+            })
         else:
             for result in retailer_results:
-                out.append(result.as_dict())
+                result_dict = result.as_dict()
+                out.append(result_dict)
+                # Add to manifest
+                manifest_retailers.append({
+                    "slug": result.retailer_id,
+                    "adapter": result.adapter,
+                    "source": result.source_url,
+                    "links": result.links_found,
+                    "downloads": result.files_downloaded,
+                    "skipped_dupes": result.skipped_dupes,
+                    "reasons": result.reasons,
+                    "errors": result.errors if result.errors else []
+                })
+    
+    # Generate and upload per-run manifest
+    if BUCKET:
+        try:
+            from .gcs import get_bucket, upload_to_gcs
+            import json
+            
+            manifest = {
+                "run_id": run_id,
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "retailers": manifest_retailers,
+                "summary": {
+                    "total_retailers": len(manifest_retailers),
+                    "total_links": sum(r.get("links", 0) for r in manifest_retailers),
+                    "total_downloads": sum(r.get("downloads", 0) for r in manifest_retailers),
+                    "total_skipped_dupes": sum(r.get("skipped_dupes", 0) for r in manifest_retailers)
+                }
+            }
+            
+            bucket = get_bucket()
+            if bucket:
+                manifest_key = f"manifests/{run_id}.json"
+                manifest_data = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
+                await upload_to_gcs(bucket, manifest_key, manifest_data, content_type="application/json")
+                logger.info("run.manifest bucket=%s key=%s retailers=%d", BUCKET, manifest_key, len(manifest_retailers))
+        except Exception as e:
+            logger.error("run.manifest.failed error=%s", str(e))
     
     return out

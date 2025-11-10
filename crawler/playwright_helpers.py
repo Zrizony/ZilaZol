@@ -10,11 +10,14 @@ from .utils import safe_name, ensure_dirs
 
 
 async def new_context(pw):
-    """Create a new Playwright browser context."""
+    """Create a new Playwright browser context with HTTPS error ignore for legacy portals."""
     browser = await pw.chromium.launch(
         headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
     )
-    ctx = await browser.new_context(locale="he-IL")
+    ctx = await browser.new_context(
+        locale="he-IL",
+        ignore_https_errors=True  # Ignore cert errors for legacy Israeli retail portals
+    )
     return browser, ctx
 
 

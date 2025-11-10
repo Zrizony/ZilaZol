@@ -1,6 +1,6 @@
 # crawler/models.py
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -18,6 +18,7 @@ class RetailerResult:
     gz: int = 0
     zips: int = 0
     subpath: Optional[str] = None
+    reasons: List[str] = field(default_factory=list)  # e.g., ["no_dom_links", "used_click_fallback"]
     
     def as_dict(self):
         d = asdict(self)
