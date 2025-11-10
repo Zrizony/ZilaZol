@@ -193,10 +193,11 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         if not links:
             links = await bina_collect_links(page)
         result.links_found = len(links)
-        logger.info("links.discovered slug=%s count=%d", retailer_id, len(links))
+        logger.info("links.discovered slug=%s adapter=bina count=%d", retailer_id, len(links))
         
         # Fallback: click-to-download if no links found
         if result.links_found == 0:
+            result.reasons.append("no_dom_links")
             frame = await bina_get_content_frame(page)
             await bina_open_tab(frame, tab_hint="PriceFull")
             got = await bina_fallback_click_downloads(page, frame, retailer_id, seen_hashes, seen_names, run_id, result)
@@ -207,6 +208,8 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                     got += await bina_fallback_click_downloads(page, frame, retailer_id, seen_hashes, seen_names, run_id, result)
                     if got > 0:
                         break
+            if got > 0:
+                result.reasons.append("used_click_fallback")
             result.files_downloaded += got
             result.links_found = got  # Update to reflect actual downloads
         

@@ -71,7 +71,8 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                             retailer_id=retailer_id,
                             source_url=source_url,
                             errors=[error_msg],
-                            adapter="publishedprices"
+                            adapter="publishedprices",
+                            reasons=["credentials_missing"]
                         )
                     else:
                         credentials = CREDS[creds_key]
@@ -99,6 +100,7 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     """Run all retailers concurrently"""
     # Generate run ID for this execution
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid.uuid4())[:8]
+    started_at = datetime.now(timezone.utc).isoformat()
     logger.info("run.start run_id=%s retailers=%d", run_id, len(retailers))
     
     # Warn if BUCKET is missing
@@ -113,11 +115,64 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     out: List[dict] = []
+    manifest_retailers = []
+    
     for retailer_results in results:
         if isinstance(retailer_results, Exception):
-            out.append({"error": str(retailer_results)})
+            error_entry = {"error": str(retailer_results)}
+            out.append(error_entry)
+            manifest_retailers.append({
+                "slug": "unknown",
+                "adapter": "unknown",
+                "source": "",
+                "links": 0,
+                "downloads": 0,
+                "skipped_dupes": 0,
+                "reasons": ["exception"],
+                "error": str(retailer_results)
+            })
         else:
             for result in retailer_results:
-                out.append(result.as_dict())
+                result_dict = result.as_dict()
+                out.append(result_dict)
+                # Add to manifest
+                manifest_retailers.append({
+                    "slug": result.retailer_id,
+                    "adapter": result.adapter,
+                    "source": result.source_url,
+                    "links": result.links_found,
+                    "downloads": result.files_downloaded,
+                    "skipped_dupes": result.skipped_dupes,
+                    "reasons": result.reasons,
+                    "errors": result.errors if result.errors else []
+                })
+    
+    # Generate and upload per-run manifest
+    if BUCKET:
+        try:
+            from .gcs import get_bucket, upload_to_gcs
+            import json
+            
+            manifest = {
+                "run_id": run_id,
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "retailers": manifest_retailers,
+                "summary": {
+                    "total_retailers": len(manifest_retailers),
+                    "total_links": sum(r.get("links", 0) for r in manifest_retailers),
+                    "total_downloads": sum(r.get("downloads", 0) for r in manifest_retailers),
+                    "total_skipped_dupes": sum(r.get("skipped_dupes", 0) for r in manifest_retailers)
+                }
+            }
+            
+            bucket = get_bucket()
+            if bucket:
+                manifest_key = f"manifests/{run_id}.json"
+                manifest_data = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
+                await upload_to_gcs(bucket, manifest_key, manifest_data, content_type="application/json")
+                logger.info("run.manifest bucket=%s key=%s retailers=%d", BUCKET, manifest_key, len(manifest_retailers))
+        except Exception as e:
+            logger.error("run.manifest.failed error=%s", str(e))
     
     return out

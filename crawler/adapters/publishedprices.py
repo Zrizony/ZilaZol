@@ -16,102 +16,113 @@ from ..parsers import parse_from_blob
 from ..utils import looks_like_price_file
 
 
-async def publishedprices_login(page: Page, username: str, password: str):
-    """Login to publishedprices with robust selector handling and explicit waits"""
-    logger.info("login.start retailer=publishedprices")
+async def publishedprices_login(page: Page, username: str, password: str) -> bool:
+    """Login to publishedprices with robust selector handling and explicit waits. Returns True if successful."""
+    logger.info("login.start retailer=publishedprices username=%s", username)
     
-    await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=90000)
-    
-    # Try username selectors
-    username_selectors = ["input[name='username']", "#username", "input[name='Email']", "input[type='email']"]
-    for sel in username_selectors:
-        if await page.locator(sel).count():
-            await page.fill(sel, username)
-            break
-    
-    # Try password selectors
-    password_selectors = ["input[name='password']", "#password", "input[type='password']"]
-    for sel in password_selectors:
-        if password and await page.locator(sel).count():
-            await page.fill(sel, password)
-            break
-    
-    # Try submit selectors
-    submit_selectors = ["button[type='submit']", "input[type='submit']", "button:has-text('כניסה')", "button:has-text('Login')"]
-    for sel in submit_selectors:
-        if await page.locator(sel).count():
-            await page.click(sel)
-            break
-    
-    # Wait for successful login with explicit UI signal
     try:
-        # Wait for URL change or file manager elements
-        await page.wait_for_url("**/file**", timeout=25000)
-        logger.info("login.success retailer=publishedprices")
-    except:
-        # Fallback: navigate to file page and wait for file manager
-        await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=25000)
-        # Wait for file manager to load
-        await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
-        logger.info("login.success retailer=publishedprices")
+        await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=90000)
+        
+        # Try username selectors
+        username_selectors = ["input[name='username']", "#username", "input[name='Email']", "input[type='email']"]
+        for sel in username_selectors:
+            if await page.locator(sel).count():
+                await page.fill(sel, username)
+                break
+        
+        # Try password selectors
+        password_selectors = ["input[name='password']", "#password", "input[type='password']"]
+        for sel in password_selectors:
+            if password and await page.locator(sel).count():
+                await page.fill(sel, password)
+                break
+        
+        # Try submit selectors
+        submit_selectors = ["button[type='submit']", "input[type='submit']", "button:has-text('כניסה')", "button:has-text('Login')"]
+        for sel in submit_selectors:
+            if await page.locator(sel).count():
+                await page.click(sel)
+                break
+        
+        # Wait for successful login with explicit UI signal
+        try:
+            # Wait for URL change or file manager elements
+            await page.wait_for_url("**/file**", timeout=25000)
+            logger.info("login.success retailer=publishedprices logged_in=true")
+            return True
+        except:
+            # Fallback: navigate to file page and wait for file manager
+            await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=25000)
+            # Wait for file manager to load
+            await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
+            logger.info("login.success retailer=publishedprices logged_in=true method=fallback")
+            return True
+    except Exception as e:
+        logger.error("login.failed retailer=publishedprices username=%s error=%s", username, str(e))
+        return False
 
 
-async def publishedprices_navigate_to_folder(page: Page, folder: str):
-    """Navigate to specific folder with robust waits and retries"""
+async def publishedprices_navigate_to_folder(page: Page, folder: str) -> bool:
+    """Navigate to specific folder with robust waits and retries. Returns True if successful."""
     logger.info("folder.navigate retailer=publishedprices folder=%s", folder)
     
-    # Wait for file/folder tree to render
-    await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
-    await page.wait_for_load_state("networkidle", timeout=10000)
-    
-    # First try direct navigation
-    target_url = f"https://url.publishedprices.co.il/file/cdup/{folder.strip('/')}/"
     try:
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(1000)
+        # Wait for file/folder tree to render
+        await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=10000)
         
-        # Check if we have files listed
-        links = await publishedprices_collect_links(page)
-        if links:
-            logger.info("folder.navigate.success retailer=publishedprices folder=%s method=direct", folder)
-            return  # Success, we have files
-    except Exception as e:
-        logger.warning("folder.navigate.direct_failed retailer=publishedprices folder=%s error=%s", folder, str(e))
-    
-    # Fallback: go to /file and click the folder
-    await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
-    await page.wait_for_load_state("networkidle", timeout=10000)
-    
-    # Try clicking folder by name with retries
-    for attempt in range(2):
+        # First try direct navigation
+        target_url = f"https://url.publishedprices.co.il/file/cdup/{folder.strip('/')}/"
         try:
-            # Try multiple selectors for folder clicking
-            folder_selectors = [
-                f"a:has-text('{folder}')",
-                f"tr:has(td:has-text('{folder}')) a[href]",
-                f"td:has-text('{folder}') a",
-                f"*:has-text('{folder}'):not(script):not(style)"
-            ]
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(1000)
             
-            for sel in folder_selectors:
-                if await page.locator(sel).count():
-                    await page.click(sel)
-                    await page.wait_for_timeout(1500)
-                    await page.wait_for_load_state("networkidle", timeout=10000)
-                    
-                    # Verify we're in the folder by checking for files
-                    links = await publishedprices_collect_links(page)
-                    if links:
-                        logger.info("folder.navigate.success retailer=publishedprices folder=%s method=click attempt=%d", folder, attempt + 1)
-                        return
-                    break
+            # Check if we have files listed
+            links = await publishedprices_collect_links(page)
+            if links:
+                logger.info("folder.navigate retailer=publishedprices folder=%s ok=true method=direct", folder)
+                return True
         except Exception as e:
-            logger.warning("folder.navigate.click_failed retailer=publishedprices folder=%s attempt=%d error=%s", folder, attempt + 1, str(e))
-            if attempt == 0:
-                await page.wait_for_timeout(2000)  # Wait before retry
-    
-    logger.error("folder.not_found retailer=publishedprices folder=%s", folder)
+            logger.warning("folder.navigate.direct_failed retailer=publishedprices folder=%s error=%s", folder, str(e))
+        
+        # Fallback: go to /file and click the folder
+        await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=10000)
+        
+        # Try clicking folder by name with retries
+        for attempt in range(2):
+            try:
+                # Try multiple selectors for folder clicking
+                folder_selectors = [
+                    f"a:has-text('{folder}')",
+                    f"tr:has(td:has-text('{folder}')) a[href]",
+                    f"td:has-text('{folder}') a",
+                    f"*:has-text('{folder}'):not(script):not(style)"
+                ]
+                
+                for sel in folder_selectors:
+                    if await page.locator(sel).count():
+                        await page.click(sel)
+                        await page.wait_for_timeout(1500)
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                        
+                        # Verify we're in the folder by checking for files
+                        links = await publishedprices_collect_links(page)
+                        if links:
+                            logger.info("folder.navigate retailer=publishedprices folder=%s ok=true method=click attempt=%d", folder, attempt + 1)
+                            return True
+                        break
+            except Exception as e:
+                logger.warning("folder.navigate.click_failed retailer=publishedprices folder=%s attempt=%d error=%s", folder, attempt + 1, str(e))
+                if attempt == 0:
+                    await page.wait_for_timeout(2000)  # Wait before retry
+        
+        logger.error("folder.navigate retailer=publishedprices folder=%s ok=false", folder)
+        return False
+    except Exception as e:
+        logger.error("folder.navigate retailer=publishedprices folder=%s ok=false error=%s", folder, str(e))
+        return False
 
 
 async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]] = None) -> List[str]:
@@ -164,20 +175,29 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
     
     try:
         # Step 1: Login
-        await publishedprices_login(page, creds["username"], creds.get("password", ""))
-        logger.info("publishedprices: logged_in=True")
+        login_ok = await publishedprices_login(page, creds["username"], creds.get("password", ""))
+        if not login_ok:
+            result.errors.append("login_failed")
+            result.reasons.append("login_failed")
+            return result
         
         # Step 2: Handle folder navigation (Super Yuda special case)
         folder = retailer.get("folder")
         if folder:
-            await publishedprices_navigate_to_folder(page, folder)
+            folder_ok = await publishedprices_navigate_to_folder(page, folder)
             result.subpath = folder
+            if not folder_ok:
+                result.reasons.append("folder_navigation_failed")
+                result.errors.append(f"folder_not_found:{folder}")
         
         # Step 3: Collect files
         patterns = retailer.get("download_patterns")
         links = await publishedprices_collect_links(page, patterns)
         result.links_found = len(links)
-        logger.info("links.discovered slug=%s count=%d", retailer_id, len(links))
+        logger.info("links.discovered slug=%s adapter=publishedprices count=%d", retailer_id, len(links))
+        
+        if result.links_found == 0:
+            result.reasons.append("no_dom_links")
         
         # Step 4: Download and process files
         seen_hashes: Set[str] = set()
