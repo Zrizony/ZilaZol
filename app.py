@@ -9,7 +9,7 @@ from crawler.core import run_all
 from crawler import logger
 from version import VERSION
 from crawler.env import get_bucket
-from crawler.config import load_retailers_config
+from crawler.config import load_retailers_config, get_retailers
 
 app = Flask(__name__)
 
@@ -47,30 +47,36 @@ def retailers_debug():
 @app.route("/run", methods=["POST"])
 def run():
     try:
-        # Parse JSON payload
+        # Parse JSON payload and query parameters
         payload = request.get_json() or {}
         retailer_filter = payload.get("retailer")
         dry_run = payload.get("dry_run", False)
-        logger.info("marker.run.enter retailer=%s", retailer_filter or "ALL")
         
-        # Load retailer configuration
-        cfg = load_retailers_config()
-        all_retailers = cfg.get("retailers", [])
+        # Get group from query parameter (e.g. /run?group=creds)
+        group = request.args.get("group")  # 'creds', 'public', or None
         
-        # Filter retailers if specific one requested
+        logger.info("marker.run.enter retailer=%s group=%s", retailer_filter or "ALL", group or "all")
+        
+        # Load retailer configuration with group filter
         if retailer_filter:
+            # If specific retailer requested, load all and filter by ID/name
+            cfg = load_retailers_config()
+            all_retailers = cfg.get("retailers", [])
             retailers = [r for r in all_retailers if r.get("id") == retailer_filter or r.get("name") == retailer_filter]
             if not retailers:
                 return jsonify({"status": "error", "error": f"Retailer '{retailer_filter}' not found"}), 404
         else:
-            retailers = [r for r in all_retailers if r.get("enabled", True)]
-            # Log disabled retailers
-            disabled = [r for r in all_retailers if not r.get("enabled", True)]
+            # Use get_retailers with group filter
+            all_retailers_for_group = get_retailers(group=group)
+            retailers = [r for r in all_retailers_for_group if r.get("enabled", True)]
+            
+            # Log disabled retailers in the current group
+            disabled = [r for r in all_retailers_for_group if not r.get("enabled", True)]
             for d in disabled:
                 reason = d.get("disabled_reason", "no_reason_specified")
                 logger.info("retailer=%s disabled reason=%s", d.get("id", "unknown"), reason)
 
-        logger.info("marker.discovery.summary retailers=%d", len(retailers))
+        logger.info("marker.discovery.summary group=%s retailers=%d", group or "all", len(retailers))
         
         if dry_run:
             return jsonify({
@@ -89,6 +95,7 @@ def run():
         
         resp = {
             "status": "done",
+            "group": group or "all",
             "retailers_processed": len(retailers),
             "results_count": len(results),
             "total_links_found": total_links,
@@ -96,7 +103,7 @@ def run():
             "total_errors": total_errors,
             "results": results
         }
-        logger.info("marker.after_extract retailers=%d total_files=%d", len(retailers), total_files)
+        logger.info("marker.after_extract group=%s retailers=%d total_files=%d", group or "all", len(retailers), total_files)
         return jsonify(resp), 200
         
     except Exception as e:

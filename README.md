@@ -89,6 +89,33 @@ curl -X POST http://localhost:8080/run \
   -d '{"dry_run":true}'
 ```
 
+### Group-Based Crawling
+
+The `/run` endpoint supports a `group` query parameter to crawl only specific subsets of retailers:
+
+- **`/run?group=creds`** - Crawls only retailers that require credentials (PublishedPrices retailers with `tenantKey` or custom `creds_key`)
+- **`/run?group=public`** - Crawls only retailers that don't require credentials (public sites, Bina Projects, etc.)
+- **`/run`** (no group parameter) - Crawls all enabled retailers (default behavior)
+
+This allows splitting crawls into separate Cloud Scheduler jobs for better control and cost optimization:
+
+```bash
+# Crawl only credentialed retailers (PublishedPrices, etc.)
+curl -X POST "http://localhost:8080/run?group=creds" \
+  -H "Content-Type: application/json"
+
+# Crawl only public retailers (Bina, generic sites, Wolt)
+curl -X POST "http://localhost:8080/run?group=public" \
+  -H "Content-Type: application/json"
+```
+
+The group filter is logged in all run markers:
+```
+marker.run.enter group=creds retailers=12
+marker.discovery.summary group=creds retailers=12
+marker.after_extract group=creds retailers=12 total_files=145
+```
+
 ## Deployment
 
 ### Automatic Deployment (GitHub → Cloud Build → Cloud Run)
