@@ -52,19 +52,21 @@ def run():
         retailer_filter = payload.get("retailer")
         dry_run = payload.get("dry_run", False)
         
-        # Get group from query parameter (e.g. /run?group=creds)
+        # Get group and slug from query parameters
+        # Examples: /run?group=creds, /run?slug=supercofix, /run?group=creds&slug=supercofix
         group = request.args.get("group")  # 'creds', 'public', or None
+        slug = request.args.get("slug") or retailer_filter  # Allow slug in query param or body
         
-        logger.info("marker.run.enter retailer=%s group=%s", retailer_filter or "ALL", group or "all")
+        logger.info("marker.run.enter slug=%s group=%s", slug or "ALL", group or "all")
         
         # Load retailer configuration with group filter
-        if retailer_filter:
-            # If specific retailer requested, load all and filter by ID/name
+        if slug:
+            # If specific retailer/slug requested, load all and filter by ID/name
             cfg = load_retailers_config()
             all_retailers = cfg.get("retailers", [])
-            retailers = [r for r in all_retailers if r.get("id") == retailer_filter or r.get("name") == retailer_filter]
+            retailers = [r for r in all_retailers if r.get("id") == slug or r.get("name") == slug]
             if not retailers:
-                return jsonify({"status": "error", "error": f"Retailer '{retailer_filter}' not found"}), 404
+                return jsonify({"status": "error", "error": f"Retailer '{slug}' not found"}), 404
         else:
             # Use get_retailers with group filter
             all_retailers_for_group = get_retailers(group=group)

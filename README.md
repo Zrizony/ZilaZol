@@ -109,12 +109,31 @@ curl -X POST "http://localhost:8080/run?group=public" \
   -H "Content-Type: application/json"
 ```
 
-The group filter is logged in all run markers:
+### Single Retailer Debugging
+
+For local debugging and testing, use the `slug` query parameter to target a single retailer:
+
+```bash
+# Debug a single retailer by slug
+curl -X POST "http://localhost:8080/run?slug=supercofix" \
+  -H "Content-Type: application/json"
+
+# Combine with group filter
+curl -X POST "http://localhost:8080/run?group=creds&slug=supercofix" \
+  -H "Content-Type: application/json"
 ```
-marker.run.enter group=creds retailers=12
-marker.discovery.summary group=creds retailers=12
-marker.after_extract group=creds retailers=12 total_files=145
+
+The manifest will contain only the specified retailer, making it easy to diagnose issues.
+
+### Manifest Analysis
+
+Use the manifest summarizer to quickly identify which retailers have issues:
+
+```bash
+python scripts/summarize_manifest.py manifests/20241201T123456Z-abc.json
 ```
+
+This outputs a table showing downloads, reasons for failures, and errors grouped by type.
 
 ## Deployment
 

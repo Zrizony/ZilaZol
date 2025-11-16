@@ -1,6 +1,7 @@
 # crawler/adapters/wolt_dateindex.py
 from __future__ import annotations
 import re
+import httpx
 from typing import List, Set
 from urllib.parse import urljoin
 
@@ -17,42 +18,57 @@ from ..parsers import parse_from_blob
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$", re.ASCII)
 
 
-async def discover_dates(page: Page, base_url: str) -> List[str]:
-    """Discover available date links on the Wolt index page."""
-    await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_load_state("networkidle", timeout=8000)
-    
-    # Get all anchor inner texts
-    items = await page.locator("a").all_inner_texts()
-    
-    # Filter visible anchors that look like dates (YYYY-MM-DD)
-    dates = [t.strip() for t in items if t and DATE_RE.match(t.strip())]
-    
-    # Sort descending (newest first) - string sort works for YYYY-MM-DD
-    dates.sort(reverse=True)
-    
-    return dates
+async def discover_dates_http(base_url: str) -> List[str]:
+    """
+    Discover available date links via HTTP (no browser needed).
+    Wolt's index page is simple HTML with date links.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(base_url)
+            resp.raise_for_status()
+            html = resp.text
+            
+            # Extract dates from href or link text (YYYY-MM-DD format)
+            import re as regex
+            # Find all YYYY-MM-DD patterns in the HTML
+            matches = regex.findall(r'(\d{4}-\d{2}-\d{2})', html)
+            dates = sorted(set(matches), reverse=True)  # Newest first
+            
+            return dates
+    except Exception as e:
+        logger.error("wolt: discover_dates.http_failed url=%s error=%s", base_url, str(e))
+        return []
 
 
-async def collect_links_for_date(page: Page, base_url: str, date_str: str, max_files: int = 80) -> List[str]:
-    """Collect .gz links for a specific date page."""
-    url = urljoin(base_url, date_str + "/")
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_load_state("networkidle", timeout=8000)
-    
-    # Find all .gz links
-    loc = page.locator("a[href$='.gz' i], a[href*='.gz' i]")
-    count = await loc.count()
-    
-    links = []
-    for i in range(min(count, max_files)):
-        href = await loc.nth(i).get_attribute("href")
-        if not href:
-            continue
-        abs_url = urljoin(url, href)
-        links.append(abs_url)
-    
-    return links
+async def collect_links_for_date_http(base_url: str, date_str: str, max_files: int = 80) -> List[str]:
+    """
+    Collect .gz links for a specific date via HTTP.
+    Wolt pages are simple HTML listings.
+    """
+    try:
+        url = urljoin(base_url, date_str + "/")
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            html = resp.text
+            
+            # Extract all .gz file links
+            import re as regex
+            # Match href="filename.gz" or href="/path/filename.gz"
+            pattern = r'href="([^"]*\.gz)"'
+            matches = regex.findall(pattern, html, regex.IGNORECASE)
+            
+            # Make absolute URLs
+            links = []
+            for match in matches[:max_files]:
+                abs_url = urljoin(url, match)
+                links.append(abs_url)
+            
+            return links
+    except Exception as e:
+        logger.error("wolt: collect_links.http_failed url=%s date=%s error=%s", base_url, date_str, str(e))
+        return []
 
 
 async def wolt_dateindex_adapter(
@@ -63,7 +79,10 @@ async def wolt_dateindex_adapter(
     seen_names: Set[str],
     run_id: str
 ) -> RetailerResult:
-    """Wolt date-index adapter - navigates to newest date and downloads files."""
+    """
+    Wolt date-index adapter - uses HTTP to fetch JSON/HTML index and downloads files.
+    No Playwright/browser needed for index discovery (only for file downloads).
+    """
     result = RetailerResult(
         retailer_id=retailer_id,
         source_url=source.get("url", ""),
@@ -75,13 +94,15 @@ async def wolt_dateindex_adapter(
     max_files = source.get("max_files", 80)
     
     try:
-        # Step 1: Discover available dates
-        dates = await discover_dates(page, base_url)
+        # Step 1: Discover available dates via HTTP (no browser)
+        dates = await discover_dates_http(base_url)
         
         if not dates:
             logger.info("wolt: no_dates slug=%s url=%s", retailer_id, base_url)
             result.reasons.append("no_dates")
             return result
+        
+        logger.info("wolt: dates.found slug=%s count=%d newest=%s", retailer_id, len(dates), dates[0] if dates else "none")
         
         # Step 2: Try newest date(s) until we find files
         newest = None
@@ -89,7 +110,7 @@ async def wolt_dateindex_adapter(
         
         for date_str in dates[:3]:  # Try up to 3 newest dates
             try:
-                links = await collect_links_for_date(page, base_url, date_str, max_files)
+                links = await collect_links_for_date_http(base_url, date_str, max_files)
                 if links:
                     newest = date_str
                     if date_str != dates[0]:
@@ -104,7 +125,7 @@ async def wolt_dateindex_adapter(
             result.reasons.append("no_files")
             return result
         
-        logger.info("wolt: date.selected slug=%s date=%s", retailer_id, newest)
+        logger.info("wolt: date.selected slug=%s date=%s files=%d", retailer_id, newest, len(links))
         result.links_found = len(links)
         logger.info("links.discovered slug=%s adapter=wolt_dateindex count=%d", retailer_id, len(links))
         
