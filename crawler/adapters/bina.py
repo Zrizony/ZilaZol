@@ -19,15 +19,42 @@ from ..adapters.base import collect_links_on_page
 TAB_CANDIDATES = ["מחיר מלא", "Price Full", "PriceFull", "Promo", "Promotions", "Stores", "חנויות"]
 
 
-async def bina_get_content_frame(page: Page) -> Frame:
-    """Get the content frame (usually an iframe with Main.aspx)."""
-    # Many Bina pages load the content in the first visible iframe
-    for f in page.frames:
+async def bina_get_content_frame(page: Page, retailer_id: str = "unknown") -> Frame:
+    """
+    Get the content frame (usually an iframe with Main.aspx or Default.aspx).
+    Bina Projects sites typically use iframes for the main content.
+    """
+    # Wait for iframes to load
+    await page.wait_for_timeout(500)
+    
+    # Try to find the main content iframe
+    frames = page.frames
+    
+    # Priority 1: Frames with Main.aspx or Default.aspx
+    for f in frames:
         with contextlib.suppress(Exception):
             url = f.url or ""
             if "Main.aspx" in url or "Default.aspx" in url:
+                logger.debug("bina.frame.found retailer=%s url=%s", retailer_id, url)
                 return f
-    # fallback: main frame
+    
+    # Priority 2: Named iframes (often called 'main' or 'content')
+    for f in frames:
+        with contextlib.suppress(Exception):
+            name = f.name or ""
+            if name.lower() in ("main", "content", "mainframe", "contentframe"):
+                logger.debug("bina.frame.found retailer=%s name=%s", retailer_id, name)
+                return f
+    
+    # Priority 3: First non-main frame (if multiple frames exist)
+    if len(frames) > 1:
+        for f in frames:
+            if f != page.main_frame:
+                logger.debug("bina.frame.fallback retailer=%s url=%s", retailer_id, f.url)
+                return f
+    
+    # Fallback: main frame
+    logger.debug("bina.frame.using_main retailer=%s", retailer_id)
     return page.main_frame
 
 
@@ -44,45 +71,125 @@ async def bina_open_tab(frame_or_page, tab_hint: str = "PriceFull") -> bool:
     return False
 
 
-async def bina_collect_links(page: Page) -> List[str]:
-    """Collect links from Bina Projects sites with iframe/postback handling (DOM + network)."""
-    frame = await bina_get_content_frame(page)
-    for candidate in ["מחיר מלא", "Price Full", "PriceFull"]:
+async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[str]:
+    """
+    Collect links from Bina Projects sites with comprehensive iframe/tab/postback handling.
+    Tries multiple strategies:
+    1. Click tabs (PriceFull, Promo, etc.)
+    2. Click search/refresh buttons
+    3. Extract links from DOM
+    4. Capture from network responses as fallback
+    """
+    frame = await bina_get_content_frame(page, retailer_id)
+    
+    # Wait for frame content to load
+    await page.wait_for_timeout(1000)
+    
+    # Strategy 1: Try to click tabs to reveal file links
+    tab_clicked = False
+    for candidate in ["מחיר מלא", "Price Full", "PriceFull", "מחירון", "Prices"]:
         try:
-            await frame.get_by_text(candidate, exact=False).click(timeout=2000)
-            break
+            if await frame.get_by_text(candidate, exact=False).count() > 0:
+                await frame.get_by_text(candidate, exact=False).first.click(timeout=2000)
+                logger.debug("bina.tab_clicked retailer=%s tab=%s", retailer_id, candidate)
+                tab_clicked = True
+                await page.wait_for_timeout(800)
+                break
         except Exception:
-            pass
-    for btn in ["חפש", "Search", "רענן"]:
+            continue
+    
+    # Strategy 2: Try to click search/refresh/export buttons
+    button_clicked = False
+    for btn in ["חפש", "Search", "רענן", "Refresh", "עדכן", "Update"]:
         try:
-            await frame.get_by_role("button", name=re.compile(btn, re.I)).click(timeout=1500)
+            btn_loc = frame.get_by_role("button", name=re.compile(btn, re.I))
+            if await btn_loc.count() > 0:
+                await btn_loc.first.click(timeout=1500)
+                logger.debug("bina.button_clicked retailer=%s button=%s", retailer_id, btn)
+                button_clicked = True
+                await page.wait_for_timeout(1000)
+                break
         except Exception:
-            pass
+            continue
+    
+    # Strategy 3: Wait for links to appear and extract from DOM
     try:
-        await frame.wait_for_selector("a[href*='.zip'], a[href*='.gz'], a:has-text('Price')", timeout=6000)
+        # Wait for file links to appear
+        await frame.wait_for_selector(
+            "a[href*='.zip'], a[href*='.gz'], a:has-text('Price'), a:has-text('Store'), a:has-text('Promo')",
+            timeout=5000
+        )
+        
+        # Extract all relevant href attributes
         hrefs = await frame.eval_on_selector_all(
             "a",
-            "els => els.map(a => a.href).filter(u => u && (u.toLowerCase().includes('.zip') || u.toLowerCase().includes('.gz') || u.toLowerCase().includes('pricefull')))"
+            """els => els.map(a => a.href).filter(u => {
+                if (!u) return false;
+                const lower = u.toLowerCase();
+                return lower.includes('.zip') || 
+                       lower.includes('.gz') || 
+                       lower.includes('pricefull') ||
+                       lower.includes('promo') ||
+                       lower.includes('stores');
+            })"""
         )
-        hrefs = list(dict.fromkeys(hrefs))
-        return hrefs
-    except Exception:
-        captured: Set[str] = set()
-        def _on_response(resp):
-            try:
-                url = (getattr(resp, "url", "") or "").lower()
-                if any(p in url for p in (".zip", ".gz", "pricefull")):
-                    captured.add(resp.url)
-            except Exception:
-                pass
-        page.on("response", _on_response)
-        for _ in range(3):
-            try:
-                await frame.locator("text=רענן").click(timeout=1000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(1000)
+        hrefs = list(dict.fromkeys(hrefs))  # Remove duplicates
+        
+        if hrefs:
+            logger.debug("bina.dom_links retailer=%s count=%d", retailer_id, len(hrefs))
+            return hrefs
+    except Exception as e:
+        logger.debug("bina.dom_links_failed retailer=%s error=%s", retailer_id, str(e))
+    
+    # Strategy 4: Fallback to network capture
+    # Some Bina sites trigger downloads via postbacks that don't show as <a> links
+    logger.debug("bina.network_capture retailer=%s starting", retailer_id)
+    captured: Set[str] = set()
+    
+    def _on_response(resp):
+        try:
+            url = (getattr(resp, "url", "") or "").lower()
+            if any(p in url for p in (".zip", ".gz", "pricefull", "promo", "stores")):
+                captured.add(resp.url)
+        except Exception:
+            pass
+    
+    page.on("response", _on_response)
+    
+    # Try clicking refresh/update buttons multiple times to trigger downloads
+    for attempt in range(3):
+        try:
+            # Try various refresh button selectors
+            refresh_selectors = [
+                "text=רענן",
+                "text=Refresh",
+                "input[value*='רענן']",
+                "input[value*='Refresh']",
+                "button:has-text('רענן')",
+                "button:has-text('Refresh')"
+            ]
+            
+            for sel in refresh_selectors:
+                try:
+                    if await frame.locator(sel).count() > 0:
+                        await frame.locator(sel).first.click(timeout=1000)
+                        break
+                except Exception:
+                    continue
+                    
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+    
+    page.remove_listener("response", _on_response)
+    
+    if captured:
+        logger.debug("bina.network_captured retailer=%s count=%d", retailer_id, len(captured))
         return list(captured)
+    
+    logger.debug("bina.no_links retailer=%s tab_clicked=%s button_clicked=%s", 
+                retailer_id, tab_clicked, button_clicked)
+    return []
 
 
 async def bina_fallback_click_downloads(
@@ -196,7 +303,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         # Collect download links via dedicated bina strategy with fallback
         links = await collect_links_on_page(page, source.get("download_patterns") or source.get("patterns"))
         if not links:
-            links = await bina_collect_links(page)
+            links = await bina_collect_links(page, retailer_id)
         result.links_found = len(links)
         logger.info("links.discovered slug=%s adapter=bina count=%d", retailer_id, len(links))
         
@@ -205,7 +312,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
             result.reasons.append("no_dom_links")
             logger.info("discovery retailer=%s adapter=bina path=click trigger", retailer_id)
             
-            frame = await bina_get_content_frame(page)
+            frame = await bina_get_content_frame(page, retailer_id)
             got = 0
             
             # Try tabs in order; stop if we get downloads
