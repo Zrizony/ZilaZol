@@ -45,50 +45,109 @@ def _normalize_dl_link(base_url: str, href: str) -> Optional[str]:
     return abs_url
 
 
-async def publishedprices_login(page: Page, username: str, password: str, retailer_id: str = "unknown") -> bool:
-    """Login to publishedprices with robust selector handling and explicit waits. Returns True if successful."""
+async def publishedprices_login(page: Page, username: str, password: str, retailer_id: str = "unknown", max_retries: int = 2) -> bool:
+    """
+    Login to publishedprices with robust selector handling, explicit waits, and retry logic.
+    Returns True if successful.
+    """
     logger.info("login.start retailer=%s adapter=publishedprices username=%s", retailer_id, username)
     
-    try:
-        await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=90000)
-        
-        # Try username selectors
-        username_selectors = ["input[name='username']", "#username", "input[name='Email']", "input[type='email']"]
-        for sel in username_selectors:
-            if await page.locator(sel).count():
-                await page.fill(sel, username)
-                break
-        
-        # Try password selectors
-        password_selectors = ["input[name='password']", "#password", "input[type='password']"]
-        for sel in password_selectors:
-            if password and await page.locator(sel).count():
-                await page.fill(sel, password)
-                break
-        
-        # Try submit selectors
-        submit_selectors = ["button[type='submit']", "input[type='submit']", "button:has-text('כניסה')", "button:has-text('Login')"]
-        for sel in submit_selectors:
-            if await page.locator(sel).count():
-                await page.click(sel)
-                break
-        
-        # Wait for successful login with explicit UI signal
+    for attempt in range(max_retries):
         try:
-            # Wait for URL change or file manager elements
-            await page.wait_for_url("**/file**", timeout=25000)
-            logger.info("login.success retailer=%s adapter=publishedprices logged_in=true", retailer_id)
-            return True
-        except:
-            # Fallback: navigate to file page and wait for file manager
-            await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=25000)
-            # Wait for file manager to load
-            await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=15000)
-            logger.info("login.success retailer=%s adapter=publishedprices logged_in=true method=fallback", retailer_id)
-            return True
-    except Exception as e:
-        logger.error("login.failed retailer=%s adapter=publishedprices username=%s error=%s", retailer_id, username, str(e))
-        return False
+            # Navigate to login page with longer timeout and network idle wait
+            try:
+                await page.goto("https://url.publishedprices.co.il/login", wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception as nav_err:
+                if attempt < max_retries - 1:
+                    logger.warning("login.nav_failed retailer=%s attempt=%d error=%s retrying", retailer_id, attempt + 1, str(nav_err))
+                    await page.wait_for_timeout(3000)  # Wait before retry
+                    continue
+                else:
+                    raise
+            
+            # Small wait for form to render
+            await page.wait_for_timeout(1000)
+            
+            # Try username selectors
+            username_filled = False
+            username_selectors = ["input[name='username']", "#username", "input[name='Email']", "input[type='email']"]
+            for sel in username_selectors:
+                try:
+                    if await page.locator(sel).count() > 0:
+                        await page.fill(sel, username)
+                        username_filled = True
+                        logger.debug("login.username_filled retailer=%s selector=%s", retailer_id, sel)
+                        break
+                except Exception:
+                    continue
+            
+            if not username_filled:
+                raise Exception("username_field_not_found")
+            
+            # Try password selectors
+            password_filled = False
+            password_selectors = ["input[name='password']", "#password", "input[type='password']"]
+            for sel in password_selectors:
+                try:
+                    if await page.locator(sel).count() > 0:
+                        await page.fill(sel, password or "")
+                        password_filled = True
+                        logger.debug("login.password_filled retailer=%s selector=%s", retailer_id, sel)
+                        break
+                except Exception:
+                    continue
+            
+            if not password_filled:
+                logger.warning("login.password_field_not_found retailer=%s continuing_anyway", retailer_id)
+            
+            # Try submit selectors
+            submit_clicked = False
+            submit_selectors = [
+                "button[type='submit']",
+                "input[type='submit']",
+                "button:has-text('כניסה')",
+                "button:has-text('Login')",
+                "form button",  # Fallback: any button in form
+            ]
+            for sel in submit_selectors:
+                try:
+                    if await page.locator(sel).count() > 0:
+                        await page.click(sel)
+                        submit_clicked = True
+                        logger.debug("login.submit_clicked retailer=%s selector=%s", retailer_id, sel)
+                        break
+                except Exception:
+                    continue
+            
+            if not submit_clicked:
+                raise Exception("submit_button_not_found")
+            
+            # Wait for successful login with explicit UI signal
+            try:
+                # Wait for URL change or file manager elements
+                await page.wait_for_url("**/file**", timeout=20000)
+                logger.info("login.success retailer=%s adapter=publishedprices logged_in=true", retailer_id)
+                return True
+            except:
+                # Fallback: navigate to file page and wait for file manager
+                await page.goto("https://url.publishedprices.co.il/file", wait_until="domcontentloaded", timeout=20000)
+                # Wait for file manager to load
+                await page.wait_for_selector("table, div#filemanager, div.dataTables_wrapper", timeout=10000)
+                logger.info("login.success retailer=%s adapter=publishedprices logged_in=true method=fallback", retailer_id)
+                return True
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning("login.attempt_failed retailer=%s attempt=%d/%d error=%s retrying", 
+                             retailer_id, attempt + 1, max_retries, str(e))
+                await page.wait_for_timeout(2000)  # Wait before retry
+            else:
+                logger.error("login.failed retailer=%s adapter=publishedprices username=%s attempts=%d error=%s", 
+                           retailer_id, username, max_retries, str(e))
+                return False
+    
+    return False
 
 
 async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_id: str = "unknown") -> bool:
