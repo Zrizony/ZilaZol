@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import re
 from typing import List, Set
+from urllib.parse import urljoin
 
 from playwright.async_api import Page, Frame
 
@@ -71,6 +72,67 @@ async def bina_open_tab(frame_or_page, tab_hint: str = "PriceFull") -> bool:
     return False
 
 
+async def bina_collect_gz_links(page: Page) -> List[str]:
+    """
+    Collect all .gz (and .zip) links from the main frame and all child frames
+    on a Bina Projects page. Returns absolute URLs.
+    
+    This is the primary DOM-based link discovery strategy for Bina sites,
+    especially those that render content inside iframes.
+    """
+    selector = "a[href$='.gz'], a[href*='.gz'], a[href$='.zip'], a[href*='.zip']"
+    hrefs: Set[str] = set()
+    
+    # 1) Main frame - try to find .gz/.zip links
+    try:
+        await page.wait_for_selector(selector, timeout=20_000)
+        vals = await page.eval_on_selector_all(selector, "els => els.map(a => a.href)")
+        for h in vals or []:
+            if h:
+                hrefs.add(h)
+    except Exception:
+        # No links in main frame, will try child frames
+        pass
+    
+    # 2) Child frames - Bina often renders content inside iframes
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        try:
+            # Check if frame has any matching links
+            if not await frame.locator(selector).count():
+                continue
+            
+            await frame.wait_for_selector(selector, timeout=10_000)
+            vals = await frame.eval_on_selector_all(selector, "els => els.map(a => a.href)")
+            for h in vals or []:
+                if h:
+                    hrefs.add(h)
+        except Exception:
+            # Frame doesn't have links or timed out, move on
+            continue
+    
+    if not hrefs:
+        return []
+    
+    # Normalize to absolute URLs and dedupe while preserving order
+    base = page.url
+    seen: Set[str] = set()
+    out: List[str] = []
+    
+    for raw in hrefs:
+        try:
+            href = urljoin(base, raw)
+        except Exception:
+            href = raw
+        
+        if href not in seen:
+            seen.add(href)
+            out.append(href)
+    
+    return out
+
+
 async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[str]:
     """
     Collect links from Bina Projects sites with comprehensive iframe/tab/postback handling.
@@ -112,34 +174,11 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
         except Exception:
             continue
     
-    # Strategy 3: Wait for links to appear and extract from DOM
-    try:
-        # Wait for file links to appear
-        await frame.wait_for_selector(
-            "a[href*='.zip'], a[href*='.gz'], a:has-text('Price'), a:has-text('Store'), a:has-text('Promo')",
-            timeout=5000
-        )
-        
-        # Extract all relevant href attributes
-        hrefs = await frame.eval_on_selector_all(
-            "a",
-            """els => els.map(a => a.href).filter(u => {
-                if (!u) return false;
-                const lower = u.toLowerCase();
-                return lower.includes('.zip') || 
-                       lower.includes('.gz') || 
-                       lower.includes('pricefull') ||
-                       lower.includes('promo') ||
-                       lower.includes('stores');
-            })"""
-        )
-        hrefs = list(dict.fromkeys(hrefs))  # Remove duplicates
-        
-        if hrefs:
-            logger.debug("bina.dom_links retailer=%s count=%d", retailer_id, len(hrefs))
-            return hrefs
-    except Exception as e:
-        logger.debug("bina.dom_links_failed retailer=%s error=%s", retailer_id, str(e))
+    # Strategy 3: Explicit .gz/.zip DOM scraping across main frame + all child frames
+    hrefs = await bina_collect_gz_links(page)
+    if hrefs:
+        logger.debug("bina.dom_links retailer=%s count=%d", retailer_id, len(hrefs))
+        return hrefs
     
     # Strategy 4: Fallback to network capture
     # Some Bina sites trigger downloads via postbacks that don't show as <a> links
@@ -187,8 +226,23 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
         logger.debug("bina.network_captured retailer=%s count=%d", retailer_id, len(captured))
         return list(captured)
     
-    logger.debug("bina.no_links retailer=%s tab_clicked=%s button_clicked=%s", 
-                retailer_id, tab_clicked, button_clicked)
+    # No links found via any strategy - log diagnostic info
+    logger.debug(
+        "bina.no_links retailer=%s url=%s frames=%d tab_clicked=%s button_clicked=%s", 
+        retailer_id,
+        page.url,
+        len(page.frames),
+        tab_clicked, 
+        button_clicked
+    )
+    
+    # Optional: take screenshot for debugging (don't crash if it fails)
+    with contextlib.suppress(Exception):
+        await page.screenshot(
+            path=f"screenshots/{retailer_id}_bina_no_links.png",
+            full_page=True,
+        )
+    
     return []
 
 
