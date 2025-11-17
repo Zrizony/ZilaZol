@@ -95,10 +95,8 @@
       "name": "ויקטורי רשת סופרמרקטים בע\"מ",
       "url": "https://laibcatalog.co.il/",
       "host": "laibcatalog.co.il",
-      "enabled": false,
-      "disabled_reason": "url_needs_verification_not_homepage",
-      "notes": "TODO: Find correct subdirectory URL for Victory Market files (e.g. /victory/, /victorymarket/, or retailer-specific path). Currently points to homepage which has no files.",
-      "tags": ["public", "no-login", "labcatalog"],
+      "enabled": true,
+      "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
     },
     {
@@ -115,10 +113,8 @@
       "name": "ח. כהן סוכנות מזון ומשקאות בע\"מ",
       "url": "https://laibcatalog.co.il/",
       "host": "laibcatalog.co.il",
-      "enabled": false,
-      "disabled_reason": "url_needs_verification_not_homepage",
-      "notes": "TODO: Find correct subdirectory URL for Chokent/Cohen files (e.g. /chokent/, /cohen/, or retailer-specific path). Currently points to homepage which has no files.",
-      "tags": ["public", "no-login", "labcatalog"],
+      "enabled": true,
+      "tags": ["public", "no-login"],
       "download_patterns": [".xml", ".gz", ".zip"]
     },
     {
