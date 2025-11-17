@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import asyncio
+import threading
 from flask import Flask, jsonify, request, current_app
 from google.cloud import storage
 
@@ -15,6 +16,33 @@ app = Flask(__name__)
 
 logger.info("startup version=%s", VERSION)
 logger.info("bucket.config=%s", get_bucket() or "NONE")
+
+
+def _run_crawler_background(retailers: list, group: str = "all"):
+    """
+    Run crawler in background thread. This function is called by /run endpoint
+    to avoid blocking Cloud Scheduler requests.
+    
+    Args:
+        retailers: List of retailer configurations to crawl
+        group: Group name for logging (e.g. 'creds', 'public', 'all')
+    """
+    try:
+        logger.info("background.crawler.start group=%s retailers=%d", group, len(retailers))
+        
+        # Run the crawler (asyncio.run creates a new event loop in this thread)
+        results = asyncio.run(run_all(retailers))
+        
+        # Calculate summary statistics
+        total_files = sum(r.get("files_downloaded", 0) for r in results)
+        total_links = sum(r.get("links_found", 0) for r in results)
+        total_errors = sum(len(r.get("errors", [])) for r in results)
+        
+        logger.info("background.crawler.done group=%s retailers=%d total_files=%d total_links=%d total_errors=%d",
+                   group, len(retailers), total_files, total_links, total_errors)
+        
+    except Exception as e:
+        logger.exception("background.crawler.failed group=%s error=%s", group, str(e))
 
 @app.get("/health")
 def health():
@@ -44,8 +72,25 @@ def retailers_debug():
         ]
     }), 200
 
-@app.route("/run", methods=["POST"])
+@app.route("/run", methods=["POST", "GET"])
 def run():
+    """
+    Trigger crawler run. Returns immediately (200 OK) and runs crawler in background.
+    
+    This endpoint is designed to work with Cloud Scheduler:
+    - Returns quickly to avoid timeout/503 errors
+    - Starts crawler in background thread
+    - Cloud Scheduler gets immediate 200 response
+    - Crawler continues running and uploads to GCS
+    
+    Query Parameters:
+        group: 'creds', 'public', or None (all)
+        slug: specific retailer ID to crawl
+    
+    Body (optional JSON):
+        retailer: specific retailer ID (deprecated, use slug param)
+        dry_run: if true, return config without running crawler
+    """
     try:
         # Parse JSON payload and query parameters
         payload = request.get_json() or {}
@@ -57,7 +102,7 @@ def run():
         group = request.args.get("group")  # 'creds', 'public', or None
         slug = request.args.get("slug") or retailer_filter  # Allow slug in query param or body
         
-        logger.info("marker.run.enter slug=%s group=%s", slug or "ALL", group or "all")
+        logger.info("marker.run.enter slug=%s group=%s dry_run=%s", slug or "ALL", group or "all", dry_run)
         
         # Load retailer configuration with group filter
         if slug:
@@ -66,6 +111,7 @@ def run():
             all_retailers = cfg.get("retailers", [])
             retailers = [r for r in all_retailers if r.get("id") == slug or r.get("name") == slug]
             if not retailers:
+                logger.error("run.error slug=%s error=not_found", slug)
                 return jsonify({"status": "error", "error": f"Retailer '{slug}' not found"}), 404
         else:
             # Use get_retailers with group filter
@@ -80,38 +126,45 @@ def run():
 
         logger.info("marker.discovery.summary group=%s retailers=%d", group or "all", len(retailers))
         
+        # Dry run: return configuration without running crawler
         if dry_run:
             return jsonify({
                 "status": "dry_run",
+                "group": group or "all",
                 "retailers_found": len(retailers),
                 "retailer_names": [r.get("name") for r in retailers]
             }), 200
         
-        # Run the crawler
-        results = asyncio.run(run_all(retailers))
+        # Start crawler in background thread and return immediately
+        # This prevents Cloud Scheduler from timing out or getting 503 errors
+        thread = threading.Thread(
+            target=_run_crawler_background,
+            args=(retailers, group or "all"),
+            daemon=True,
+            name=f"crawler-{group or 'all'}"
+        )
+        thread.start()
         
-        # Calculate summary statistics
-        total_files = sum(r.get("files_downloaded", 0) for r in results)
-        total_links = sum(r.get("links_found", 0) for r in results)
-        total_errors = sum(len(r.get("errors", [])) for r in results)
+        logger.info("marker.run.accepted group=%s retailers=%d thread=%s", 
+                   group or "all", len(retailers), thread.name)
         
-        resp = {
-            "status": "done",
+        # Return immediately to Cloud Scheduler
+        return jsonify({
+            "status": "accepted",
+            "message": "Crawler started in background",
             "group": group or "all",
-            "retailers_processed": len(retailers),
-            "results_count": len(results),
-            "total_links_found": total_links,
-            "total_files_downloaded": total_files,
-            "total_errors": total_errors,
-            "results": results
-        }
-        logger.info("marker.after_extract group=%s retailers=%d total_files=%d", group or "all", len(retailers), total_files)
-        return jsonify(resp), 200
+            "retailers_count": len(retailers)
+        }), 200
         
     except Exception as e:
-        # Return 200 so Cloud Scheduler stops retrying forever
-        current_app.logger.exception("run_failed")
-        return jsonify({"status": "error", "error": str(e)}), 200
+        # CRITICAL: Always return 200 to prevent Cloud Scheduler retry loops
+        # Log the exception but don't propagate 5xx errors
+        logger.exception("run.endpoint.failed error=%s", str(e))
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "message": "Failed to start crawler"
+        }), 200
 
 
 if __name__ == "__main__":

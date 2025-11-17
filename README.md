@@ -16,13 +16,41 @@
 - **Structured logging** for Cloud Run compatibility
 
 ## HTTP Endpoints
-- `POST /run` - Trigger crawler (supports JSON payload)
+- `POST /run` - Trigger crawler (async, returns immediately)
+  - Returns `200 OK` instantly with `{"status": "accepted", ...}`
+  - Starts crawler in background thread
+  - Designed for Cloud Scheduler (no timeout/503 errors)
 - `GET /health` - Health check
 - `GET /version` - Version info (legacy)
 - `GET /__version` - Active version (RELEASE/COMMIT_SHA)
 - `GET /__env` - Environment variables (non-sensitive)
 - `POST /__smoke` - GCS smoke test (uploads test file to bucket)
 - `GET /retailers` - Debug retailer discovery
+
+### /run Endpoint Behavior
+
+**Important**: The `/run` endpoint is **async-safe** and returns immediately:
+
+1. Client (Cloud Scheduler) calls `/run?group=public`
+2. Endpoint validates config and starts crawler in background thread
+3. Returns `200 OK` **immediately** (within milliseconds)
+4. Crawler runs in background, uploads to GCS, logs to Cloud Run
+5. Client is not blocked waiting for crawl to complete
+
+**Response format**:
+```json
+{
+  "status": "accepted",
+  "message": "Crawler started in background",
+  "group": "public",
+  "retailers_count": 15
+}
+```
+
+**Why this matters**:
+- Cloud Scheduler won't timeout or return 503 errors
+- Cold starts don't cause request failures
+- Multiple scheduler jobs can run concurrently without blocking each other
 
 ## Environment Variables
 
@@ -184,16 +212,85 @@ This checks:
 
 ### Cloud Scheduler Configuration
 
-Ensure your Cloud Scheduler job's Target URL matches the Cloud Run service URL:
+**IMPORTANT**: Cloud Scheduler jobs must be in the **same region** as Cloud Run to avoid 503 errors.
+
+- **Cloud Run region**: `me-west1`
+- **Cloud Scheduler region**: `me-west1` (must match!)
+
+#### Automated Setup
+
+Use the provided script to create/update scheduler jobs:
+
+```bash
+chmod +x scripts/setup_scheduler.sh
+./scripts/setup_scheduler.sh
+```
+
+This creates three jobs in `me-west1`:
+- `zilazol-crawler-public` → `/run?group=public` (every 3 hours)
+- `zilazol-crawler-creds` → `/run?group=creds` (every 6 hours)
+- `zilazol-crawler-daily` → `/run` (daily at 3 AM Jerusalem time)
+
+#### Manual Setup
+
+If you need to create jobs manually:
 
 ```bash
 # Get the service URL
-gcloud run services describe price-crawler \
+SERVICE_URL=$(gcloud run services describe price-crawler \
   --region me-west1 \
-  --format='value(status.url)'
+  --format='value(status.url)')
+
+# Create a scheduler job in me-west1 (MUST be same region as Cloud Run)
+gcloud scheduler jobs create http zilazol-crawler-public \
+  --location=me-west1 \
+  --schedule="0 */3 * * *" \
+  --uri="${SERVICE_URL}/run?group=public" \
+  --http-method=POST \
+  --oidc-service-account-email=YOUR-PROJECT@appspot.gserviceaccount.com \
+  --oidc-token-audience="${SERVICE_URL}" \
+  --time-zone="Asia/Jerusalem"
 ```
 
-Update the Scheduler job to use this URL for the `/run` endpoint.
+#### Testing Scheduler Jobs
+
+```bash
+# List jobs
+gcloud scheduler jobs list --location=me-west1
+
+# Run a job manually
+gcloud scheduler jobs run zilazol-crawler-public --location=me-west1
+
+# Check Cloud Run logs
+gcloud logging read 'resource.type=cloud_run_revision AND resource.labels.service_name=price-crawler' --limit=50
+```
+
+#### Troubleshooting 503 Errors
+
+If you see `URL_UNREACHABLE_UNREACHABLE_5xx` or 503 errors:
+
+1. **Check region mismatch**: Scheduler and Cloud Run must be in same region
+   ```bash
+   # Check where jobs exist
+   gcloud scheduler jobs list --location=europe-west1  # Wrong region!
+   gcloud scheduler jobs list --location=me-west1      # Correct region
+   ```
+
+2. **Delete jobs from wrong region**:
+   ```bash
+   gcloud scheduler jobs delete JOB_NAME --location=europe-west1
+   ```
+
+3. **Verify /run endpoint responds quickly**:
+   ```bash
+   curl -X POST "${SERVICE_URL}/run?group=public" \
+     -H "Authorization: Bearer $(gcloud auth print-identity-token)"
+   
+   # Should return immediately with:
+   # {"status": "accepted", "message": "Crawler started in background", ...}
+   ```
+
+4. **Check Cloud Run logs** for `background.crawler.start` and `background.crawler.done` messages
 
 ## GCS Layout
 
