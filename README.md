@@ -212,28 +212,36 @@ This checks:
 
 ### Cloud Scheduler Configuration
 
-**IMPORTANT**: Cloud Scheduler jobs must be in the **same region** as Cloud Run to avoid 503 errors.
+**Cloud Run Configuration**:
+- **Region**: `me-west1`
+- **Memory**: `16Gi` (required to prevent OOM kills)
+- **CPU**: `2 vCPU`
+- **Timeout**: `3600s` (1 hour)
+- **Concurrency**: 3 retailers crawled simultaneously (prevents memory exhaustion)
 
-- **Cloud Run region**: `me-west1`
-- **Cloud Scheduler region**: `me-west1` (must match!)
+**Cloud Scheduler**:
+- **Region**: Can be any region (cross-region calls are supported)
+- Cloud Scheduler may be in `europe-west1` or `me-west1` - both work fine
+- The `/run` endpoint returns immediately, so Scheduler doesn't wait for crawl completion
 
-#### Automated Setup
+#### Why 16Gi Memory?
 
-Use the provided script to create/update scheduler jobs:
+The crawler uses Playwright browsers which are memory-intensive:
+- Each browser instance: ~1-2 GB RAM
+- With 3 concurrent crawlers: ~3-6 GB
+- Peak usage with parsing/uploads: ~8-12 GB
+- **16Gi provides safe headroom** to prevent OOM container kills
 
-```bash
-chmod +x scripts/setup_scheduler.sh
-./scripts/setup_scheduler.sh
-```
+**Previous issue**: Running with 8Gi caused frequent OOM kills (`Container terminated on signal 9`), which caused 503 errors to Cloud Scheduler.
 
-This creates three jobs in `me-west1`:
-- `zilazol-crawler-public` → `/run?group=public` (every 3 hours)
-- `zilazol-crawler-creds` → `/run?group=creds` (every 6 hours)
-- `zilazol-crawler-daily` → `/run` (daily at 3 AM Jerusalem time)
+#### Concurrency Limiting
 
-#### Manual Setup
+The crawler uses `asyncio.Semaphore(3)` to limit concurrent retailers:
+- Maximum 3 Playwright browsers running simultaneously
+- Prevents memory spikes from crawling 30+ retailers in parallel
+- Each retailer waits for a semaphore slot before starting
 
-If you need to create jobs manually:
+#### Testing Scheduler Jobs
 
 ```bash
 # Get the service URL
@@ -241,56 +249,55 @@ SERVICE_URL=$(gcloud run services describe price-crawler \
   --region me-west1 \
   --format='value(status.url)')
 
-# Create a scheduler job in me-west1 (MUST be same region as Cloud Run)
-gcloud scheduler jobs create http zilazol-crawler-public \
-  --location=me-west1 \
-  --schedule="0 */3 * * *" \
-  --uri="${SERVICE_URL}/run?group=public" \
-  --http-method=POST \
-  --oidc-service-account-email=YOUR-PROJECT@appspot.gserviceaccount.com \
-  --oidc-token-audience="${SERVICE_URL}" \
-  --time-zone="Asia/Jerusalem"
-```
+# Test the /run endpoint manually
+curl -X POST "${SERVICE_URL}/run?group=public" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)"
 
-#### Testing Scheduler Jobs
-
-```bash
-# List jobs
-gcloud scheduler jobs list --location=me-west1
-
-# Run a job manually
-gcloud scheduler jobs run zilazol-crawler-public --location=me-west1
-
-# Check Cloud Run logs
-gcloud logging read 'resource.type=cloud_run_revision AND resource.labels.service_name=price-crawler' --limit=50
+# Should return immediately with:
+# {"status": "accepted", "message": "Crawler started in background", ...}
 ```
 
 #### Troubleshooting 503 Errors
 
 If you see `URL_UNREACHABLE_UNREACHABLE_5xx` or 503 errors:
 
-1. **Check region mismatch**: Scheduler and Cloud Run must be in same region
+1. **Check for OOM kills in Cloud Run logs**:
    ```bash
-   # Check where jobs exist
-   gcloud scheduler jobs list --location=europe-west1  # Wrong region!
-   gcloud scheduler jobs list --location=me-west1      # Correct region
+   gcloud logging read 'resource.type=cloud_run_revision 
+     AND resource.labels.service_name=price-crawler 
+     AND textPayload=~"Memory limit"' \
+     --limit=10 \
+     --format=json
    ```
+   
+   If you see `Memory limit of X MiB exceeded` → Container is OOM-killed → Increase memory
 
-2. **Delete jobs from wrong region**:
+2. **Check Cloud Run resource configuration**:
    ```bash
-   gcloud scheduler jobs delete JOB_NAME --location=europe-west1
+   gcloud run services describe price-crawler \
+     --region me-west1 \
+     --format='value(spec.template.spec.containers[0].resources.limits)'
    ```
+   
+   Should show: `memory: 16Gi, cpu: "2"`
 
 3. **Verify /run endpoint responds quickly**:
    ```bash
    curl -X POST "${SERVICE_URL}/run?group=public" \
      -H "Authorization: Bearer $(gcloud auth print-identity-token)"
    
-   # Should return immediately with:
+   # Should return in < 1 second with:
    # {"status": "accepted", "message": "Crawler started in background", ...}
    ```
 
-4. **Check Cloud Run logs** for `background.crawler.start` and `background.crawler.done` messages
+4. **Check Cloud Run logs** for `background.crawler.start` and `background.crawler.done` messages:
+   ```bash
+   gcloud logging read 'resource.type=cloud_run_revision 
+     AND resource.labels.service_name=price-crawler 
+     AND textPayload=~"background.crawler"' \
+     --limit=20 \
+     --format=json
+   ```
 
 ## GCS Layout
 

@@ -16,6 +16,9 @@ gcloud run deploy "${SERVICE}" \
   --image "${IMAGE}" \
   --region "${REGION}" \
   --platform managed \
+  --memory 16Gi \
+  --cpu 2 \
+  --timeout 3600 \
   --set-env-vars "RELEASE=${RELEASE},GCS_BUCKET=${BUCKET}" \
   --allow-unauthenticated \
   --project "${PROJECT_ID}"

@@ -32,6 +32,9 @@ steps:
           --image gcr.io/$PROJECT_ID/zilazol:$COMMIT_SHA \
           --region ${_REGION} \
           --platform managed \
+          --memory 16Gi \
+          --cpu 2 \
+          --timeout 3600 \
           --set-env-vars RELEASE=$COMMIT_SHA,GCS_BUCKET=${_GCS_BUCKET} \
           --allow-unauthenticated \
           --project $PROJECT_ID

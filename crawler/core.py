@@ -1,6 +1,7 @@
 # crawler/core.py
 from __future__ import annotations
 import asyncio
+import gc
 from datetime import datetime, timezone
 import uuid
 from typing import List, Set
@@ -105,25 +106,49 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
         finally:
             await ctx.close()
             await browser.close()
+            # Explicit cleanup to free memory
+            del page, ctx, browser
+            gc.collect()
 
     return results
 
 
 async def run_all(retailers: List[dict]) -> List[dict]:
-    """Run all retailers concurrently"""
+    """
+    Run all retailers with concurrency limiting to prevent OOM.
+    
+    Uses a semaphore to limit concurrent crawlers to 3 at a time,
+    preventing memory exhaustion from running too many Playwright
+    browsers simultaneously.
+    """
     # Generate run ID for this execution
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid.uuid4())[:8]
     started_at = datetime.now(timezone.utc).isoformat()
-    logger.info("run.start run_id=%s retailers=%d", run_id, len(retailers))
+    logger.info("run.start run_id=%s retailers=%d concurrency_limit=3", run_id, len(retailers))
     
     # Warn if BUCKET is missing
     if not BUCKET:
         logger.warning("No bucket configured - GCS uploads will be skipped")
 
+    # Semaphore to limit concurrent crawlers (prevents OOM from too many browsers)
+    sem = asyncio.Semaphore(3)
+    
+    async def limited_crawl(retailer):
+        """Wrapper that applies concurrency limit"""
+        async with sem:
+            logger.debug("retailer.start id=%s acquiring_semaphore", retailer.get("id", "unknown"))
+            try:
+                result = await crawl_retailer(retailer, run_id)
+                return result
+            finally:
+                # Force garbage collection after each retailer
+                gc.collect()
+                logger.debug("retailer.done id=%s releasing_semaphore", retailer.get("id", "unknown"))
+    
     tasks = []
     for retailer in retailers:
         if retailer.get("enabled", True):
-            tasks.append(crawl_retailer(retailer, run_id))
+            tasks.append(limited_crawl(retailer))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
