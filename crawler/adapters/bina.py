@@ -17,6 +17,7 @@ from ..parsers import parse_from_blob
 from .generic import collect_links_on_page
 
 
+
 TAB_CANDIDATES = ["מחיר מלא", "Price Full", "PriceFull", "Promo", "Promotions", "Stores", "חנויות"]
 
 
