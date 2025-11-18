@@ -2,19 +2,49 @@
 from __future__ import annotations
 import os
 from datetime import datetime, timezone
-from typing import List, Set
+from typing import List, Set, Optional
 
 from playwright.async_api import Page
 
 from .. import logger
-from ..constants import SCREENSHOTS_DIR
+from ..constants import SCREENSHOTS_DIR, DEFAULT_DOWNLOAD_SUFFIXES
 from ..models import RetailerResult
 from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
 from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
-from ..adapters.base import collect_links_on_page
-from ..utils import ensure_dirs
+from ..utils import ensure_dirs, looks_like_price_file
+
+
+async def collect_links_on_page(page: Page, patterns: Optional[List[str]] = None) -> List[str]:
+    """Collect download links with broader filters for generic sites."""
+    # Expanded selectors for better link discovery
+    selectors = [
+        "a[download]",
+        "a[href*='download']",
+        "a[href*='file']",
+        "a[href$='.xml' i]",
+        "a[href$='.gz' i]",
+        "a[href$='.zip' i]",
+        "a[href*='.xml?' i]",
+        "a[href*='.gz?' i]",
+        "a[href*='.zip?' i]",
+    ]
+    # Build suffix selectors from patterns
+    pat = [p.lower() for p in (patterns or DEFAULT_DOWNLOAD_SUFFIXES)]
+    for p in pat:
+        selectors.append(f"a[href$='{p}' i]")
+        selectors.append(f"a[href*='{p}?' i]")
+
+    hrefs = set()
+    for sel in selectors:
+        if await page.locator(sel).count():
+            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
+            for h in (vals or []):
+                if h and (looks_like_price_file(h) or h.lower().endswith(tuple(pat))):
+                    hrefs.add(h)
+    
+    return sorted(hrefs)
 
 
 async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: Set[str], seen_names: Set[str], run_id: str) -> RetailerResult:

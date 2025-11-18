@@ -14,7 +14,7 @@ from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
 from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
-from ..adapters.base import collect_links_on_page
+from .generic import collect_links_on_page
 
 
 TAB_CANDIDATES = ["מחיר מלא", "Price Full", "PriceFull", "Promo", "Promotions", "Stores", "חנויות"]
