@@ -2,12 +2,12 @@
 from __future__ import annotations
 import os
 import asyncio
-import threading
 from flask import Flask, jsonify, request, current_app
 from google.cloud import storage
 
 from crawler.core import run_all
 from crawler import logger
+from crawler.constants import BUCKET
 from version import VERSION
 from crawler.env import get_bucket
 from crawler.config import load_retailers_config, get_retailers
@@ -16,35 +16,6 @@ app = Flask(__name__)
 
 logger.info("startup version=%s", VERSION)
 logger.info("bucket.config=%s", get_bucket() or "NONE")
-
-
-def _run_crawler_background(retailers: list, group: str = "all"):
-    """
-    Run crawler in background thread. This function is called by /run endpoint
-    to avoid blocking Cloud Scheduler requests.
-    
-    Args:
-        retailers: List of retailer configurations to crawl
-        group: Group name for logging (e.g. 'creds', 'public', 'all')
-    """
-    try:
-        thread_id = threading.current_thread().ident
-        logger.info("background.crawler.start group=%s retailers=%d thread_id=%s", group, len(retailers), thread_id)
-        
-        # Run the crawler (asyncio.run creates a new event loop in this thread)
-        results = asyncio.run(run_all(retailers))
-        
-        # Calculate summary statistics
-        total_files = sum(r.get("files_downloaded", 0) for r in results)
-        total_links = sum(r.get("links_found", 0) for r in results)
-        total_errors = sum(len(r.get("errors", [])) for r in results)
-        
-        logger.info("background.crawler.done group=%s retailers=%d total_files=%d total_links=%d total_errors=%d thread_id=%s",
-                   group, len(retailers), total_files, total_links, total_errors, thread_id)
-        
-    except Exception as e:
-        thread_id = threading.current_thread().ident
-        logger.exception("background.crawler.failed group=%s error=%s thread_id=%s", group, str(e), thread_id)
 
 @app.get("/health")
 def health():
@@ -77,13 +48,13 @@ def retailers_debug():
 @app.route("/run", methods=["POST", "GET"])
 def run():
     """
-    Trigger crawler run. Returns immediately (200 OK) and runs crawler in background.
+    Trigger crawler run. Executes synchronously and blocks until crawl completes.
     
-    This endpoint is designed to work with Cloud Scheduler:
-    - Returns quickly to avoid timeout/503 errors
-    - Starts crawler in background thread
-    - Cloud Scheduler gets immediate 200 response
-    - Crawler continues running and uploads to GCS
+    This endpoint runs the entire crawl within the HTTP request lifecycle:
+    - Blocks until run_all() completes
+    - Returns 200 with results after crawl finishes
+    - Works under Cloud Run's 1-hour request timeout (--timeout 3600)
+    - Cloud Run keeps container alive as long as request is active
     
     Query Parameters:
         group: 'creds', 'public', or None (all)
@@ -137,37 +108,64 @@ def run():
                 "retailer_names": [r.get("name") for r in retailers]
             }), 200
         
-        # Start crawler in background thread and return immediately
-        # This prevents Cloud Scheduler from timing out or getting 503 errors
-        # CRITICAL: daemon=False keeps the process alive - Cloud Run won't kill container while thread runs
-        thread = threading.Thread(
-            target=_run_crawler_background,
-            args=(retailers, group or "all"),
-            daemon=False,  # Changed from True - keeps process alive until thread completes
-            name=f"crawler-{group or 'all'}"
-        )
-        thread.start()
+        # Execute crawler synchronously - blocks until crawl completes
+        logger.info("marker.run.start group=%s retailers=%d", group or "all", len(retailers))
         
-        logger.info("marker.run.accepted group=%s retailers=%d thread=%s daemon=%s", 
-                   group or "all", len(retailers), thread.name, thread.daemon)
-        
-        # Return immediately to Cloud Scheduler
-        return jsonify({
-            "status": "accepted",
-            "message": "Crawler started in background",
-            "group": group or "all",
-            "retailers_count": len(retailers)
-        }), 200
+        try:
+            # Run the crawler - this blocks until all retailers are processed
+            results = asyncio.run(run_all(retailers))
+            
+            # Calculate summary statistics
+            total_files = sum(r.get("files_downloaded", 0) for r in results)
+            total_links = sum(r.get("links_found", 0) for r in results)
+            total_downloads = sum(r.get("files_downloaded", 0) for r in results)
+            total_errors = sum(len(r.get("errors", [])) for r in results)
+            
+            logger.info("marker.run.complete group=%s retailers=%d total_files=%d total_links=%d total_downloads=%d total_errors=%d",
+                       group or "all", len(retailers), total_files, total_links, total_downloads, total_errors)
+            
+            # Extract run_id from results if available (from first result or log)
+            # The manifest is uploaded to GCS by run_all(), so we return the path
+            manifest_path = None
+            if BUCKET and results:
+                # Try to extract run_id from first result's source_url or from logs
+                # The manifest key format is: manifests/{run_id}.json
+                # We can't easily get it here, but we can indicate it was uploaded
+                manifest_path = f"gs://{BUCKET}/manifests/"
+            
+            # Return success response with results summary
+            return jsonify({
+                "status": "success",
+                "group": group or "all",
+                "retailers": len(retailers),
+                "results_count": len(results),
+                "summary": {
+                    "total_files": total_files,
+                    "total_links": total_links,
+                    "total_downloads": total_downloads,
+                    "total_errors": total_errors
+                },
+                "manifest_path": manifest_path,
+                "message": "Crawl completed successfully"
+            }), 200
+            
+        except Exception as e:
+            # Surface exceptions from run_all() - don't hide them
+            logger.exception("run_all.failed group=%s error=%s", group or "all", str(e))
+            return jsonify({
+                "status": "error",
+                "error": str(e),
+                "message": "Crawl failed during execution"
+            }), 500
         
     except Exception as e:
-        # CRITICAL: Always return 200 to prevent Cloud Scheduler retry loops
-        # Log the exception but don't propagate 5xx errors
+        # Handle errors in request parsing or retailer loading
         logger.exception("run.endpoint.failed error=%s", str(e))
         return jsonify({
             "status": "error",
             "error": str(e),
             "message": "Failed to start crawler"
-        }), 200
+        }), 500
 
 
 if __name__ == "__main__":
