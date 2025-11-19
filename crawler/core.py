@@ -14,6 +14,7 @@ from .credentials import CREDS
 from .models import RetailerResult
 from .playwright_helpers import new_context
 from .adapters import crawl_publishedprices, bina_adapter, generic_adapter, wolt_dateindex_adapter
+from .memory_utils import log_memory
 
 
 async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
@@ -125,6 +126,7 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid.uuid4())[:8]
     started_at = datetime.now(timezone.utc).isoformat()
     logger.info("run.start run_id=%s retailers=%d concurrency_limit=3", run_id, len(retailers))
+    log_memory(logger, f"run.start run_id={run_id}")
     
     # Warn if BUCKET is missing
     if not BUCKET:
@@ -133,17 +135,18 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     # Semaphore to limit concurrent crawlers (prevents OOM from too many browsers)
     sem = asyncio.Semaphore(3)
     
-    async def limited_crawl(retailer):
-        """Wrapper that applies concurrency limit"""
+    async def limited_crawl(retailer: dict):
+        slug = retailer.get("id", retailer.get("name", "unknown"))
         async with sem:
-            logger.debug("retailer.start id=%s acquiring_semaphore", retailer.get("id", "unknown"))
+            logger.debug("retailer.start id=%s acquiring_semaphore", slug)
+            log_memory(logger, f"before_retailer id={slug}")
             try:
                 result = await crawl_retailer(retailer, run_id)
                 return result
             finally:
-                # Force garbage collection after each retailer
                 gc.collect()
-                logger.debug("retailer.done id=%s releasing_semaphore", retailer.get("id", "unknown"))
+                log_memory(logger, f"after_retailer id={slug}")
+                logger.debug("retailer.done id=%s releasing_semaphore", slug)
     
     tasks = []
     for retailer in retailers:
@@ -151,6 +154,8 @@ async def run_all(retailers: List[dict]) -> List[dict]:
             tasks.append(limited_crawl(retailer))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    log_memory(logger, "run_all.done_before_manifest")
 
     out: List[dict] = []
     manifest_retailers = []
@@ -185,7 +190,7 @@ async def run_all(retailers: List[dict]) -> List[dict]:
                     "errors": result.errors if result.errors else []
                 })
     
-    # Generate and upload per-run manifest
+    # Generate and upload per-run manifest with retry and timeout protection
     if BUCKET:
         try:
             from .gcs import get_bucket, upload_to_gcs
@@ -208,8 +213,33 @@ async def run_all(retailers: List[dict]) -> List[dict]:
             if bucket:
                 manifest_key = f"manifests/{run_id}.json"
                 manifest_data = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
-                await upload_to_gcs(bucket, manifest_key, manifest_data, content_type="application/json")
-                logger.info("run.manifest bucket=%s key=%s retailers=%d", BUCKET, manifest_key, len(manifest_retailers))
+                
+                # Upload with timeout protection (30s) and retry logic
+                max_retries = 3
+                uploaded = False
+                for attempt in range(max_retries):
+                    try:
+                        # Upload with timeout protection
+                        await asyncio.wait_for(
+                            upload_to_gcs(bucket, manifest_key, manifest_data, content_type="application/json"),
+                            timeout=30.0
+                        )
+                        logger.info("run.manifest bucket=%s key=%s retailers=%d", BUCKET, manifest_key, len(manifest_retailers))
+                        uploaded = True
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning("run.manifest.timeout attempt=%d/%d key=%s", attempt+1, max_retries, manifest_key)
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    except Exception as e:
+                        logger.warning("run.manifest.retry attempt=%d/%d error=%s", attempt+1, max_retries, str(e))
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        else:
+                            raise
+                
+                if not uploaded:
+                    logger.error("run.manifest.failed_all_retries key=%s", manifest_key)
         except Exception as e:
             logger.error("run.manifest.failed error=%s", str(e))
     

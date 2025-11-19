@@ -14,6 +14,7 @@ from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
 from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
+from ..memory_utils import log_memory
 from .generic import collect_links_on_page
 
 
@@ -75,42 +76,34 @@ async def bina_open_tab(frame_or_page, tab_hint: str = "PriceFull") -> bool:
 
 async def bina_collect_gz_links(page: Page) -> List[str]:
     """
-    Collect all .gz (and .zip) links from the main frame and all child frames
-    on a Bina Projects page. Returns absolute URLs.
+    Collect all .gz (and .zip) links from ALL frames (main + child frames).
+    Returns absolute URLs.
     
     This is the primary DOM-based link discovery strategy for Bina sites,
     especially those that render content inside iframes.
+    
+    FIXED: Scans all frames without blocking waits - prevents timeout issues.
     """
     selector = "a[href$='.gz'], a[href*='.gz'], a[href$='.zip'], a[href*='.zip']"
     hrefs: Set[str] = set()
     
-    # 1) Main frame - try to find .gz/.zip links
-    try:
-        await page.wait_for_selector(selector, timeout=20_000)
-        vals = await page.eval_on_selector_all(selector, "els => els.map(a => a.href)")
-        for h in vals or []:
-            if h:
-                hrefs.add(h)
-    except Exception:
-        # No links in main frame, will try child frames
-        pass
-    
-    # 2) Child frames - Bina often renders content inside iframes
+    # Scan ALL frames (main + child frames) without waiting for selector first
+    # This prevents timeouts when links are only in child frames
     for frame in page.frames:
-        if frame == page.main_frame:
-            continue
         try:
-            # Check if frame has any matching links
-            if not await frame.locator(selector).count():
+            # Use locator.count() which doesn't throw if selector doesn't exist
+            count = await frame.locator(selector).count()
+            if count == 0:
                 continue
             
-            await frame.wait_for_selector(selector, timeout=10_000)
+            # Extract links from this frame
             vals = await frame.eval_on_selector_all(selector, "els => els.map(a => a.href)")
             for h in vals or []:
                 if h:
                     hrefs.add(h)
-        except Exception:
-            # Frame doesn't have links or timed out, move on
+        except Exception as e:
+            # Frame scan failed - log but continue to next frame
+            logger.debug("bina.frame_scan_error frame=%s error=%s", frame.url or "unknown", str(e))
             continue
     
     if not hrefs:
@@ -355,10 +348,23 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         # Additional wait for dynamic content
         await page.wait_for_timeout(2000)
         
-        # Collect download links via dedicated bina strategy with fallback
-        links = await collect_links_on_page(page, source.get("download_patterns") or source.get("patterns"))
+        # Collect download links - use Bina-specific collection FIRST (handles frames properly)
+        log_memory(logger, f"bina.before_collect_links retailer={retailer_id}")
+        
+        # Log frame info for debugging
+        logger.info("bina.page_loaded retailer=%s url=%s frames=%d", retailer_id, page.url, len(page.frames))
+        for i, frame in enumerate(page.frames):
+            logger.debug("bina.frame[%d] url=%s name=%s", i, frame.url or "N/A", frame.name or "N/A")
+        
+        # Try Bina-specific collection first (handles frames and tabs properly)
+        links = await bina_collect_links(page, retailer_id)
+        
+        # Fallback to generic collection only if Bina-specific found nothing
         if not links:
-            links = await bina_collect_links(page, retailer_id)
+            logger.debug("bina.fallback_to_generic retailer=%s", retailer_id)
+            links = await collect_links_on_page(page, source.get("download_patterns") or source.get("patterns"))
+        
+        log_memory(logger, f"bina.after_collect_links retailer={retailer_id} count={len(links)}")
         result.links_found = len(links)
         logger.info("links.discovered slug=%s adapter=bina count=%d", retailer_id, len(links))
         
@@ -384,6 +390,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
             result.links_found = got  # Update to reflect actual downloads
         
         # Process each link (existing flow)
+        log_memory(logger, f"bina.before_downloads retailer={retailer_id} links={len(links)}")
         bucket = get_bucket()
         for link in links:
             filename = link.split('/')[-1] or link  # Fallback for error logging
@@ -426,6 +433,8 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                 result.errors.append(f"download_error:{link}:{e}")
                 logger.error("download.failed retailer=%s link=%s file=%s err=%s", retailer_id, link, filename, str(e))
                 continue
+        
+        log_memory(logger, f"bina.after_downloads retailer={retailer_id} downloaded={result.files_downloaded}")
                 
     except Exception as e:
         result.errors.append(f"fatal:{e}")

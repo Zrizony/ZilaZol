@@ -215,7 +215,7 @@ This checks:
 **Cloud Run Configuration**:
 - **Region**: `me-west1`
 - **Memory**: `16Gi` (required to prevent OOM kills)
-- **CPU**: `2 vCPU`
+- **CPU**: `4 vCPU` (supports concurrent Playwright browsers and parsing)
 - **Timeout**: `3600s` (1 hour)
 - **Concurrency**: 3 retailers crawled simultaneously (prevents memory exhaustion)
 
@@ -233,6 +233,14 @@ The crawler uses Playwright browsers which are memory-intensive:
 - **16Gi provides safe headroom** to prevent OOM container kills
 
 **Previous issue**: Running with 8Gi caused frequent OOM kills (`Container terminated on signal 9`), which caused 503 errors to Cloud Scheduler.
+
+**Memory Instrumentation**: The crawler now includes memory usage logging at key checkpoints:
+- Run start/end
+- Before/after each retailer
+- Before/after link collection
+- Before/after downloads
+
+Check logs for `mem.stats` entries to monitor actual memory usage and optimize resource allocation.
 
 #### Concurrency Limiting
 
@@ -279,7 +287,7 @@ If you see `URL_UNREACHABLE_UNREACHABLE_5xx` or 503 errors:
      --format='value(spec.template.spec.containers[0].resources.limits)'
    ```
    
-   Should show: `memory: 16Gi, cpu: "2"`
+   Should show: `memory: 16Gi, cpu: "4"`
 
 3. **Verify /run endpoint responds quickly**:
    ```bash
@@ -349,6 +357,7 @@ Super Yuda requires navigation to the "Yuda" folder after login. The crawler:
 The crawler uses structured logging suitable for Cloud Run:
 ```
 2024-12-01T14:30:22Z INFO run.start run_id=20241201T143022Z-abc12345 retailers=5
+2024-12-01T14:30:22Z INFO mem.stats rss_mb=850.4 vms_mb=3200.0 note=run.start run_id=20241201T143022Z-abc12345
 2024-12-01T14:30:23Z INFO login.start retailer=publishedprices
 2024-12-01T14:30:25Z INFO login.success retailer=publishedprices
 2024-12-01T14:30:26Z INFO folder.navigate retailer=publishedprices folder=Yuda
@@ -356,3 +365,45 @@ The crawler uses structured logging suitable for Cloud Run:
 2024-12-01T14:30:30Z INFO upload.ok retailer=superyuda file=prices.xml gcs_path=raw/superyuda/20241201T143022Z-abc12345/prices.xml
 2024-12-01T14:30:32Z INFO manifest.written retailer=superyuda run_id=20241201T143022Z-abc12345 files=3
 ```
+
+### Memory Monitoring
+
+The crawler includes memory usage instrumentation using `psutil` to track RAM consumption:
+
+**Memory log format**:
+```
+mem.stats rss_mb=1470.2 vms_mb=4000.0 note=before_retailer id=shufersal
+```
+
+- `rss_mb`: Resident Set Size (actual RAM used) in MiB
+- `vms_mb`: Virtual Memory Size in MiB
+- `note`: Context describing when the measurement was taken
+
+**Checkpoints logged**:
+- Run start/end (`run.start`, `run_all.done_before_manifest`)
+- Before/after each retailer (`before_retailer`, `after_retailer`)
+- Link collection phases (`bina.before_collect_links`, `generic.after_collect_links`)
+- Download phases (`bina.before_downloads`, `generic.after_downloads`)
+
+**Query memory logs**:
+```bash
+# Get all memory stats from recent runs
+gcloud logging read 'resource.type=cloud_run_revision 
+  AND resource.labels.service_name=price-crawler 
+  AND textPayload=~"mem.stats"' \
+  --limit=100 \
+  --format=json | jq -r '.[] | .textPayload' | grep "mem.stats"
+
+# Find peak memory usage
+gcloud logging read 'resource.type=cloud_run_revision 
+  AND resource.labels.service_name=price-crawler 
+  AND textPayload=~"mem.stats"' \
+  --limit=1000 \
+  --format=json | jq -r '.[] | .textPayload' | \
+  grep "mem.stats" | grep -oP 'rss_mb=\K[0-9.]+' | sort -n | tail -1
+```
+
+Use these logs to:
+- Verify actual memory usage vs. allocated resources
+- Identify memory leaks or growth patterns
+- Optimize Cloud Run memory allocation (reduce if consistently low, increase if hitting limits)

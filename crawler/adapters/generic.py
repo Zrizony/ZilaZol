@@ -14,10 +14,15 @@ from ..download import fetch_url
 from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
 from ..utils import ensure_dirs, looks_like_price_file
+from ..memory_utils import log_memory
 
 
 async def collect_links_on_page(page: Page, patterns: Optional[List[str]] = None) -> List[str]:
-    """Collect download links with broader filters for generic sites."""
+    """
+    Collect download links from main frame AND all child frames.
+    
+    FIXED: Now scans all frames, not just main frame, to handle sites with iframes.
+    """
     # Expanded selectors for better link discovery
     selectors = [
         "a[download]",
@@ -37,12 +42,22 @@ async def collect_links_on_page(page: Page, patterns: Optional[List[str]] = None
         selectors.append(f"a[href*='{p}?' i]")
 
     hrefs = set()
-    for sel in selectors:
-        if await page.locator(sel).count():
-            vals = await page.eval_on_selector_all(sel, "els => els.map(a => a.href)")
-            for h in (vals or []):
-                if h and (looks_like_price_file(h) or h.lower().endswith(tuple(pat))):
-                    hrefs.add(h)
+    
+    # Scan ALL frames (main + child frames) - many sites use iframes
+    for frame in page.frames:
+        for sel in selectors:
+            try:
+                count = await frame.locator(sel).count()
+                if count == 0:
+                    continue
+                
+                vals = await frame.eval_on_selector_all(sel, "els => els.map(a => a.href)")
+                for h in (vals or []):
+                    if h and (looks_like_price_file(h) or h.lower().endswith(tuple(pat))):
+                        hrefs.add(h)
+            except Exception:
+                # Frame scan failed for this selector, continue to next
+                continue
     
     return sorted(hrefs)
 
@@ -64,6 +79,7 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         await page.wait_for_timeout(2000)
         
         # Collect download links with retry logic
+        log_memory(logger, f"generic.before_collect_links retailer={retailer_id}")
         patterns = source.get("download_patterns") or source.get("patterns") or None
         links = await collect_links_on_page(page, patterns)
         
@@ -73,6 +89,7 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
             await page.wait_for_timeout(800)
             links = await collect_links_on_page(page, patterns)
         
+        log_memory(logger, f"generic.after_collect_links retailer={retailer_id} count={len(links)}")
         result.links_found = len(links)
         
         # If still no links, take screenshot and log
@@ -87,6 +104,7 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         logger.info("links.discovered slug=%s adapter=generic count=%d", retailer_id, len(links))
         
         # Process each link
+        log_memory(logger, f"generic.before_downloads retailer={retailer_id} links={len(links)}")
         bucket = get_bucket()
         for link in links:
             filename = link.split('/')[-1] or link  # Fallback for error logging
@@ -129,6 +147,8 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                 result.errors.append(f"download_error:{link}:{e}")
                 logger.error("download.failed retailer=%s link=%s file=%s err=%s", retailer_id, link, filename, str(e))
                 continue
+        
+        log_memory(logger, f"generic.after_downloads retailer={retailer_id} downloaded={result.files_downloaded}")
                 
     except Exception as e:
         result.errors.append(f"fatal:{e}")

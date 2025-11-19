@@ -1,5 +1,6 @@
 # crawler/gcs.py
 from __future__ import annotations
+import asyncio
 from typing import Dict, Optional
 
 from google.cloud import storage
@@ -23,15 +24,25 @@ async def upload_to_gcs(
     md5_hex: str = None,
     metadata: Optional[Dict[str, str]] = None,
 ):
-    """Upload data to GCS with optional MD5 metadata."""
-    blob = bucket.blob(blob_path)
-    blob.upload_from_string(data, content_type=content_type)
+    """
+    Upload data to GCS with optional MD5 metadata.
     
-    # Set MD5 metadata if provided
-    meta = dict(metadata or {})
-    if md5_hex:
-        meta.setdefault("md5_hex", md5_hex)
-    if meta:
-        blob.metadata = meta
-        blob.patch()
+    Wraps sync GCS calls in executor to avoid blocking event loop.
+    """
+    loop = asyncio.get_event_loop()
+    
+    def _upload_sync():
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(data, content_type=content_type)
+        
+        # Set MD5 metadata if provided
+        meta = dict(metadata or {})
+        if md5_hex:
+            meta.setdefault("md5_hex", md5_hex)
+        if meta:
+            blob.metadata = meta
+            blob.patch()
+    
+    # Run sync upload in executor to avoid blocking
+    await loop.run_in_executor(None, _upload_sync)
 

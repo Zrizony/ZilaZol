@@ -28,7 +28,8 @@ def _run_crawler_background(retailers: list, group: str = "all"):
         group: Group name for logging (e.g. 'creds', 'public', 'all')
     """
     try:
-        logger.info("background.crawler.start group=%s retailers=%d", group, len(retailers))
+        thread_id = threading.current_thread().ident
+        logger.info("background.crawler.start group=%s retailers=%d thread_id=%s", group, len(retailers), thread_id)
         
         # Run the crawler (asyncio.run creates a new event loop in this thread)
         results = asyncio.run(run_all(retailers))
@@ -38,11 +39,12 @@ def _run_crawler_background(retailers: list, group: str = "all"):
         total_links = sum(r.get("links_found", 0) for r in results)
         total_errors = sum(len(r.get("errors", [])) for r in results)
         
-        logger.info("background.crawler.done group=%s retailers=%d total_files=%d total_links=%d total_errors=%d",
-                   group, len(retailers), total_files, total_links, total_errors)
+        logger.info("background.crawler.done group=%s retailers=%d total_files=%d total_links=%d total_errors=%d thread_id=%s",
+                   group, len(retailers), total_files, total_links, total_errors, thread_id)
         
     except Exception as e:
-        logger.exception("background.crawler.failed group=%s error=%s", group, str(e))
+        thread_id = threading.current_thread().ident
+        logger.exception("background.crawler.failed group=%s error=%s thread_id=%s", group, str(e), thread_id)
 
 @app.get("/health")
 def health():
@@ -137,16 +139,17 @@ def run():
         
         # Start crawler in background thread and return immediately
         # This prevents Cloud Scheduler from timing out or getting 503 errors
+        # CRITICAL: daemon=False keeps the process alive - Cloud Run won't kill container while thread runs
         thread = threading.Thread(
             target=_run_crawler_background,
             args=(retailers, group or "all"),
-            daemon=True,
+            daemon=False,  # Changed from True - keeps process alive until thread completes
             name=f"crawler-{group or 'all'}"
         )
         thread.start()
         
-        logger.info("marker.run.accepted group=%s retailers=%d thread=%s", 
-                   group or "all", len(retailers), thread.name)
+        logger.info("marker.run.accepted group=%s retailers=%d thread=%s daemon=%s", 
+                   group or "all", len(retailers), thread.name, thread.daemon)
         
         # Return immediately to Cloud Scheduler
         return jsonify({
