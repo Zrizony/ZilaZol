@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import asyncio
+import threading
 from flask import Flask, jsonify, request, current_app
 from google.cloud import storage
 
@@ -16,6 +17,51 @@ app = Flask(__name__)
 
 logger.info("startup version=%s", VERSION)
 logger.info("bucket.config=%s", get_bucket() or "NONE")
+
+
+def _run_crawler_background(retailers, group_for_log):
+    """
+    Helper function to run the crawler in a background thread.
+    
+    This function is called by threading.Thread to execute the crawler
+    asynchronously without blocking the HTTP request.
+    """
+    try:
+        logger.info(
+            "background.crawler.thread_start thread_id=%s group=%s retailers=%d",
+            threading.current_thread().ident,
+            group_for_log,
+            len(retailers),
+        )
+        
+        from time import perf_counter
+        start = perf_counter()
+        
+        # Run the crawler to completion
+        results = asyncio.run(run_all(retailers))
+        
+        duration = perf_counter() - start
+        
+        success_count = sum(1 for r in results if not r.get("errors"))
+        error_count = len(results) - success_count
+        
+        logger.info(
+            "background.crawler.thread_end thread_id=%s group=%s retailers=%d duration_sec=%.2f success=%d errors=%d",
+            threading.current_thread().ident,
+            group_for_log,
+            len(retailers),
+            duration,
+            success_count,
+            error_count,
+        )
+    except Exception as e:
+        logger.exception(
+            "background.crawler.thread_failed thread_id=%s group=%s error=%s",
+            threading.current_thread().ident,
+            group_for_log,
+            str(e),
+        )
+
 
 @app.get("/health")
 def health():
@@ -45,18 +91,107 @@ def retailers_debug():
         ]
     }), 200
 
+
+@app.route("/trigger", methods=["GET", "POST"])
+def trigger():
+    """
+    Lightweight endpoint intended for Cloud Scheduler.
+
+    - Accepts ?group=creds or ?group=public (or no group → 'all').
+    - Resolves the retailer list for that group.
+    - Starts the crawler in a background thread via _run_crawler_background.
+    - Returns 200 OK immediately so Cloud Scheduler never times out.
+    """
+    # Read group from query parameters; default to "all" for logging
+    group = request.args.get("group")
+    group_for_log = group or "all"
+
+    try:
+        logger.info("trigger.enter group=%s", group_for_log)
+
+        # Use existing config helper; filter to enabled retailers only
+        all_retailers_for_group = get_retailers(group=group)
+        retailers = [r for r in all_retailers_for_group if r.get("enabled", True)]
+
+        # Log disabled retailers so we can see why counts differ
+        disabled = [r for r in all_retailers_for_group if not r.get("enabled", True)]
+        for d in disabled:
+            reason = d.get("disabled_reason", "no_reason_specified")
+            logger.info(
+                "trigger.retailer_disabled id=%s group=%s reason=%s",
+                d.get("id", "unknown"),
+                group_for_log,
+                reason,
+            )
+
+        logger.info(
+            "trigger.discovery.summary group=%s retailers=%d",
+            group_for_log,
+            len(retailers),
+        )
+
+        if not retailers:
+            # Still return 200 so Scheduler sees success, but log clearly
+            logger.warning("trigger.no_retailers group=%s", group_for_log)
+            return jsonify(
+                {
+                    "status": "accepted",
+                    "message": "No enabled retailers for group",
+                    "group": group_for_log,
+                    "retailers_count": 0,
+                }
+            ), 200
+
+        # Start crawler in a **non-daemon** thread so the container stays alive
+        thread = threading.Thread(
+            target=_run_crawler_background,
+            args=(retailers, group_for_log),
+            daemon=False,
+            name=f"trigger-crawler-{group_for_log}",
+        )
+        thread.start()
+
+        logger.info(
+            "trigger.accepted group=%s retailers=%d thread=%s daemon=%s",
+            group_for_log,
+            len(retailers),
+            thread.name,
+            thread.daemon,
+        )
+
+        return jsonify(
+            {
+                "status": "accepted",
+                "message": "Crawler started in background",
+                "group": group_for_log,
+                "retailers_count": len(retailers),
+            }
+        ), 200
+
+    except Exception as e:
+        # IMPORTANT: We still return 200 to avoid Cloud Scheduler retry storms.
+        logger.exception("trigger.failed group=%s error=%s", group_for_log, e)
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Failed to start crawler; see logs for details",
+                "group": group_for_log,
+                "error": str(e),
+            }
+        ), 200
+
+
 @app.route("/run", methods=["POST", "GET"])
 def run():
     """
-    Trigger crawler run. Runs the crawler synchronously inside this request.
+    Trigger crawler run.
 
-    This endpoint is designed to be called by Cloud Scheduler:
-    - Scheduler calls /run?group=...
-    - Endpoint runs the full crawl with run_all(...)
-    - When the crawl finishes, /run returns a JSON summary and 200 OK
+    This endpoint performs full parameter parsing (group, slug, dry_run, etc.)
+    and is primarily intended for manual / debugging usage.
 
-    This ensures Cloud Run keeps the container alive for the whole crawl and
-    uploads to GCS are not interrupted by background thread shutdown.
+    For Cloud Scheduler, prefer calling /trigger, which is a lightweight
+    wrapper that only starts the crawler in a background thread and returns 200
+    immediately.
     """
     group = None  # Initialize for error handler
     try:
