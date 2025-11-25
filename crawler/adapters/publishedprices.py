@@ -165,8 +165,8 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_i
             await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(1000)
             
-            # Check if we have files listed
-            links = await publishedprices_collect_links(page, retailer_id=retailer_id)
+            # Check if we have files listed (don't filter by date for folder check)
+            links = await publishedprices_collect_links(page, retailer_id=retailer_id, filter_today=False)
             if links:
                 logger.info("folder.navigate retailer=%s adapter=publishedprices folder=%s ok=true method=direct", retailer_id, folder)
                 return True
@@ -195,8 +195,8 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_i
                         await page.wait_for_timeout(1500)
                         await page.wait_for_load_state("networkidle", timeout=10000)
                         
-                        # Verify we're in the folder by checking for files
-                        links = await publishedprices_collect_links(page, retailer_id=retailer_id)
+                        # Verify we're in the folder by checking for files (don't filter by date for folder check)
+                        links = await publishedprices_collect_links(page, retailer_id=retailer_id, filter_today=False)
                         if links:
                             logger.info("folder.navigate retailer=%s adapter=publishedprices folder=%s ok=true method=click attempt=%d", retailer_id, folder, attempt + 1)
                             return True
@@ -213,25 +213,94 @@ async def publishedprices_navigate_to_folder(page: Page, folder: str, retailer_i
         return False
 
 
-async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]] = None, retailer_id: str = "unknown") -> List[str]:
-    """Collect download links from publishedprices file manager with normalization"""
+async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]] = None, retailer_id: str = "unknown", filter_today: bool = True) -> List[str]:
+    """
+    Collect download links from publishedprices file manager with normalization.
+    
+    If filter_today=True, only returns links from files matching today's date.
+    Extracts dates from table rows to filter by date.
+    """
+    from datetime import datetime
+    
     # Wait for page to load
     await page.wait_for_load_state("domcontentloaded")
     await page.wait_for_load_state("networkidle")
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(1000)  # Wait for table to render
     
-    # Get all hrefs
-    hrefs = await page.eval_on_selector_all(
-        "a[href]",
-        "els => els.map(a => a.getAttribute('href'))"
-    )
+    # PublishedPrices uses MM/DD/YYYY format (US format) like "11/25/2025 12:03 AM"
+    today_str = datetime.now().strftime("%m/%d/%Y")  # MM/DD/YYYY format
+    today_iso = datetime.now().strftime("%Y-%m-%d")
     
-    # Normalize to absolute URLs and filter
+    # Extract links WITH dates from table rows
+    # The file manager shows files in a table with date columns in MM/DD/YYYY HH:MM AM/PM format
+    link_data = await page.evaluate("""
+        () => {
+            const links = [];
+            // Find all table rows
+            const rows = Array.from(document.querySelectorAll('table tr, tbody tr'));
+            
+            rows.forEach((row) => {
+                // Find download link in this row
+                const link = row.querySelector('a[href*=".gz"], a[href*=".zip"], a[href*=".xml"]');
+                if (!link) return;
+                
+                const href = link.getAttribute('href');
+                if (!href) return;
+                
+                // Try to find date in this row
+                // PublishedPrices uses MM/DD/YYYY HH:MM AM/PM format (e.g., "11/25/2025 12:03 AM")
+                const rowText = row.textContent || '';
+                
+                // Try MM/DD/YYYY format (US format used by PublishedPrices)
+                const dateMatch1 = rowText.match(/(\\d{1,2}\\/\\d{1,2}\\/\\d{4})/);
+                // Try YYYY-MM-DD format (ISO format, fallback)
+                const dateMatch2 = rowText.match(/(\\d{4}-\\d{2}-\\d{2})/);
+                // Try DD/MM/YYYY format (European format, fallback)
+                const dateMatch3 = rowText.match(/(\\d{1,2}\\/\\d{1,2}\\/\\d{4})/);
+                
+                let dateStr = null;
+                if (dateMatch1) {
+                    // MM/DD/YYYY format (most likely for PublishedPrices)
+                    dateStr = dateMatch1[1];
+                } else if (dateMatch2) {
+                    dateStr = dateMatch2[1];
+                } else if (dateMatch3) {
+                    dateStr = dateMatch3[1];
+                } else {
+                    // Try to find date in specific cells (especially Date column)
+                    const cells = row.querySelectorAll('td');
+                    cells.forEach(cell => {
+                        const cellText = cell.textContent || '';
+                        // Prioritize MM/DD/YYYY format
+                        const cellDateMatch1 = cellText.match(/(\\d{1,2}\\/\\d{1,2}\\/\\d{4})/);
+                        const cellDateMatch2 = cellText.match(/(\\d{4}-\\d{2}-\\d{2})/);
+                        if (cellDateMatch1 && !dateStr) {
+                            dateStr = cellDateMatch1[1];
+                        } else if (cellDateMatch2 && !dateStr) {
+                            dateStr = cellDateMatch2[1];
+                        }
+                    });
+                }
+                
+                links.push({
+                    href: href,
+                    date: dateStr,
+                    filename: href.split('/').pop() || href
+                });
+            });
+            
+            return links;
+        }
+    """)
+    
+    # Normalize to absolute URLs and filter by date
     base_url = page.url
     links = []
     skipped = 0
+    skipped_not_today = 0
     
-    for h in (hrefs or []):
+    for link_info in (link_data or []):
+        h = link_info.get('href')
         if not h:
             continue
         
@@ -241,10 +310,66 @@ async def publishedprices_collect_links(page: Page, patterns: Optional[List[str]
             skipped += 1
             continue
         
+        # Filter by today's date if requested
+        if filter_today:
+            date_str = link_info.get('date')
+            if date_str:
+                # Check if date matches today
+                date_matches = False
+                
+                # Direct string comparison (fastest)
+                if date_str == today_str:  # MM/DD/YYYY format (PublishedPrices format)
+                    date_matches = True
+                elif date_str == today_iso:  # YYYY-MM-DD format
+                    date_matches = True
+                else:
+                    # Try to parse and compare dates
+                    try:
+                        if '/' in date_str:
+                            parts = date_str.split('/')
+                            if len(parts) == 3:
+                                # Try MM/DD/YYYY format first (PublishedPrices format)
+                                try:
+                                    parsed_date = datetime(int(parts[2]), int(parts[0]), int(parts[1]))
+                                    today = datetime.now()
+                                    date_matches = (parsed_date.date() == today.date())
+                                except ValueError:
+                                    # Fallback: try DD/MM/YYYY format
+                                    try:
+                                        parsed_date = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+                                        today = datetime.now()
+                                        date_matches = (parsed_date.date() == today.date())
+                                    except ValueError:
+                                        pass
+                        elif '-' in date_str:
+                            # YYYY-MM-DD format
+                            parsed_date = datetime.fromisoformat(date_str)
+                            today = datetime.now()
+                            date_matches = (parsed_date.date() == today.date())
+                    except Exception as e:
+                        logger.debug("publishedprices.date_parse_error retailer=%s date=%s error=%s", 
+                                   retailer_id, date_str, str(e))
+                        pass
+                
+                if not date_matches:
+                    skipped_not_today += 1
+                    logger.debug("publishedprices.skip_not_today retailer=%s filename=%s date=%s today=%s", 
+                               retailer_id, link_info.get('filename', ''), date_str, today_str)
+                    continue
+            else:
+                # If no date found, log but don't skip (might be a file without date info)
+                logger.debug("publishedprices.no_date retailer=%s filename=%s", retailer_id, link_info.get('filename', ''))
+        
         links.append(normalized)
     
     if skipped > 0:
-        logger.debug("publishedprices: skip_href retailer=%s skipped=%d", retailer_id, skipped)
+        logger.debug("publishedprices.skip_href retailer=%s skipped=%d", retailer_id, skipped)
+    if skipped_not_today > 0:
+        logger.info("publishedprices.skip_not_today retailer=%s skipped=%d filter_today=%s", 
+                   retailer_id, skipped_not_today, filter_today)
+    
+    logger.info("publishedprices.links_collected retailer=%s total=%d filtered_today=%s", 
+               retailer_id, len(links), filter_today)
     
     return sorted(set(links))
 
@@ -284,11 +409,11 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 result.reasons.append("folder_navigation_failed")
                 result.errors.append(f"folder_not_found:{folder}")
         
-        # Step 3: Collect files
+        # Step 3: Collect files (filtered to today's date)
         patterns = retailer.get("download_patterns")
-        links = await publishedprices_collect_links(page, patterns, retailer_id)
+        links = await publishedprices_collect_links(page, patterns, retailer_id, filter_today=True)
         result.links_found = len(links)
-        logger.info("links.discovered slug=%s adapter=publishedprices count=%d", retailer_id, len(links))
+        logger.info("links.discovered slug=%s adapter=publishedprices count=%d (today only)", retailer_id, len(links))
         
         if result.links_found == 0:
             result.reasons.append("no_dom_links")

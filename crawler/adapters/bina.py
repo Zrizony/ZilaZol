@@ -65,47 +65,110 @@ async def bina_open_tab(frame_or_page, tab_hint: str = "PriceFull") -> bool:
     return False
 
 
-async def bina_collect_download_buttons(page: Page, frame: Frame) -> List[dict]:
+async def bina_collect_download_buttons(page: Page, frame: Frame, filter_today: bool = True) -> List[dict]:
     """
     Collect download buttons that use onclick="Download('filename.gz')" pattern.
-    Returns list of dicts with 'filename' and 'button_locator' info.
+    Returns list of dicts with 'filename', 'date', 'button_index', and other info.
     
     This is the PRIMARY strategy for Bina sites - they use JavaScript Download() buttons,
     not direct <a> links.
+    
+    If filter_today=True, only returns buttons from rows matching today's date.
     """
+    from datetime import datetime
+    
     buttons_found: List[dict] = []
     
     try:
-        # Strategy 1: Find buttons with onclick="Download('filename')"
-        # Extract filename from onclick attribute
-        download_buttons = await frame.eval_on_selector_all(
-            "button[onclick*='Download'], button[onclick*='download']",
-            """
-            els => els.map(btn => {
-                const onclick = btn.getAttribute('onclick') || '';
-                // Extract filename from Download('filename') or Download("filename")
-                const match = onclick.match(/Download\\(['"]([^'"]+)\\)/i);
-                return {
-                    filename: match ? match[1] : null,
-                    onclick: onclick,
-                    id: btn.id || null,
-                    text: btn.textContent?.trim() || ''
-                };
-            }).filter(b => b.filename)
-            """
-        )
+        # Get today's date in DD/MM/YYYY format (matches the table format)
+        today_str = datetime.now().strftime("%d/%m/%Y")
         
-        for btn_info in download_buttons or []:
+        # Strategy: Extract buttons WITH their row dates from the table
+        # The table structure has rows with date cells and download buttons
+        button_data = await frame.evaluate("""
+            () => {
+                const buttons = [];
+                // Find all table rows (tr elements)
+                const rows = Array.from(document.querySelectorAll('table tr, tbody tr'));
+                
+                rows.forEach((row, rowIndex) => {
+                    // Find download button in this row
+                    const btn = row.querySelector("button[onclick*='Download'], button[onclick*='download']");
+                    if (!btn) return;
+                    
+                    // Extract filename from onclick
+                    const onclick = btn.getAttribute('onclick') || '';
+                    const match = onclick.match(/Download\\(['"]([^'"]+)\\)/i);
+                    if (!match) return;
+                    
+                    const filename = match[1];
+                    if (!filename.endsWith('.gz') && !filename.endsWith('.zip')) return;
+                    
+                    // Try to find date in this row - look for DD/MM/YYYY pattern (Bina format)
+                    // Dates are in format: DD/MM/YYYY HH:MM (e.g., "25/11/2025 01:24")
+                    const rowText = row.textContent || '';
+                    const dateMatch = rowText.match(/(\\d{1,2}\\/\\d{1,2}\\/\\d{4})/);
+                    const dateStr = dateMatch ? dateMatch[1] : null;  // Extract just DD/MM/YYYY part
+                    
+                    // Also try to find date in specific cells (תאריך column)
+                    let cellDate = null;
+                    const cells = row.querySelectorAll('td');
+                    cells.forEach(cell => {
+                        const cellText = cell.textContent || '';
+                        // Match DD/MM/YYYY format (Bina uses this format)
+                        const cellDateMatch = cellText.match(/(\\d{1,2}\\/\\d{1,2}\\/\\d{4})/);
+                        if (cellDateMatch) {
+                            cellDate = cellDateMatch[1];  // Extract just DD/MM/YYYY part (without time)
+                        }
+                    });
+                    
+                    buttons.push({
+                        filename: filename,
+                        onclick: onclick,
+                        id: btn.id || null,
+                        text: btn.textContent?.trim() || '',
+                        date: cellDate || dateStr,
+                        rowIndex: rowIndex,
+                        buttonIndex: buttons.length  // Index among buttons found
+                    });
+                });
+                
+                return buttons;
+            }
+        """)
+        
+        for btn_info in button_data or []:
             filename = btn_info.get('filename')
-            if filename and (filename.endswith('.gz') or filename.endswith('.zip')):
-                buttons_found.append({
-                    'filename': filename,
-                    'onclick': btn_info.get('onclick', ''),
-                    'id': btn_info.get('id'),
-                    'text': btn_info.get('text', '')
-                })
+            date_str = btn_info.get('date')
+            
+            # Filter by today's date if requested
+            # date_str should be in DD/MM/YYYY format (extracted from table, time component removed)
+            if filter_today:
+                if not date_str:
+                    # If no date found, skip (we want to be conservative)
+                    logger.debug("bina.skip_no_date filename=%s", filename)
+                    continue
+                
+                # Normalize date_str - remove any time component if present
+                date_str_clean = date_str.split()[0] if ' ' in date_str else date_str
+                
+                if date_str_clean != today_str:
+                    logger.debug("bina.skip_not_today filename=%s date=%s today=%s", 
+                               filename, date_str_clean, today_str)
+                    continue
+            
+            buttons_found.append({
+                'filename': filename,
+                'onclick': btn_info.get('onclick', ''),
+                'id': btn_info.get('id'),
+                'text': btn_info.get('text', ''),
+                'date': date_str,
+                'row_index': btn_info.get('rowIndex'),
+                'button_index': btn_info.get('buttonIndex')
+            })
         
-        logger.debug("bina.download_buttons retailer=unknown found=%d", len(buttons_found))
+        logger.info("bina.download_buttons found=%d filtered_today=%s today=%s", 
+                   len(buttons_found), filter_today, today_str)
         
     except Exception as e:
         logger.debug("bina.button_extract_error error=%s", str(e))
@@ -165,6 +228,7 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
     Collect download links from Bina Projects sites.
     
     PRIMARY STRATEGY: Find buttons with onclick="Download('filename.gz')" and extract filenames.
+    Filters to only today's files by default.
     These buttons trigger JavaScript downloads, so we return the filenames as "pseudo-links"
     that will be handled by the click-to-download fallback.
     
@@ -178,15 +242,15 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
     await page.wait_for_load_state("networkidle", timeout=10000)
     await page.wait_for_timeout(2000)  # Wait for table to render
     
-    # Strategy 1: Find Download() buttons and extract filenames
+    # Strategy 1: Find Download() buttons and extract filenames (filtered to today)
     # This is the PRIMARY strategy based on the actual site structure
-    download_buttons = await bina_collect_download_buttons(page, frame)
+    download_buttons = await bina_collect_download_buttons(page, frame, filter_today=True)
     
     if download_buttons:
         # Return filenames as "pseudo-links" - they'll be handled by click fallback
         # Format: "download_button:filename.gz" to distinguish from real URLs
         pseudo_links = [f"download_button:{btn['filename']}" for btn in download_buttons]
-        logger.info("bina.download_buttons retailer=%s count=%d", retailer_id, len(pseudo_links))
+        logger.info("bina.download_buttons retailer=%s count=%d (today only)", retailer_id, len(pseudo_links))
         return pseudo_links
     
     # Strategy 2: Try to click tabs/filters to reveal download buttons
@@ -272,35 +336,64 @@ async def bina_fallback_click_downloads(
     run_id: str,
     result: RetailerResult,
     max_files: int = 60,
-    throttle_ms: int = 200
+    throttle_ms: int = 200,
+    filter_today: bool = True
 ) -> int:
     """
     Click download buttons and capture downloads via expect_download().
     
     PRIMARY STRATEGY: Find buttons with onclick="Download('filename')" - these are the actual
     download buttons used by Bina sites.
+    
+    If filter_today=True, only clicks buttons from rows matching today's date.
     """
+    from datetime import datetime
+    
     total = 0
     bucket = get_bucket()
+    today_str = datetime.now().strftime("%d/%m/%Y")
     
-    # Strategy 1: Find Download() buttons (PRIMARY - matches actual site structure)
-    download_buttons = frame.locator("button[onclick*='Download'], button[onclick*='download']")
-    button_count = await download_buttons.count()
+    # Strategy 1: Find Download() buttons filtered by today's date (PRIMARY)
+    # First, collect button info with dates
+    download_buttons_info = await bina_collect_download_buttons(page, frame, filter_today=filter_today)
+    buttons_found_with_filter = len(download_buttons_info) > 0
     
-    if button_count > 0:
-        logger.info("discovery retailer=%s adapter=bina path=click found_controls count=%d selector=button[onclick*='Download']", 
-                   retailer_id, button_count)
+    if download_buttons_info:
+        logger.info("discovery retailer=%s adapter=bina path=click found_controls count=%d filter_today=%s", 
+                   retailer_id, len(download_buttons_info), filter_today)
         
-        n = min(button_count, max_files)
+        # Get all download buttons locator
+        download_buttons = frame.locator("button[onclick*='Download'], button[onclick*='download']")
+        button_count = await download_buttons.count()
         
-        for i in range(n):
+        # Create a mapping of button indices to download
+        # We need to click buttons in order, but only those matching today
+        buttons_to_click = []
+        for btn_info in download_buttons_info:
+            btn_idx = btn_info.get('button_index')
+            if btn_idx is not None and btn_idx < button_count:
+                buttons_to_click.append((btn_idx, btn_info))
+        
+        # Limit to max_files if specified (0 means no limit)
+        if max_files > 0:
+            buttons_to_click = buttons_to_click[:max_files]
+        # If max_files is 0 or negative, use all buttons (no limit)
+        
+        logger.info("discovery retailer=%s adapter=bina buttons_to_click=%d", retailer_id, len(buttons_to_click))
+        
+        for btn_idx, btn_info in buttons_to_click:
             try:
+                filename_expected = btn_info.get('filename', 'unknown')
+                date_str = btn_info.get('date', 'unknown')
+                logger.debug("bina.clicking_button retailer=%s idx=%d filename=%s date=%s", 
+                           retailer_id, btn_idx, filename_expected, date_str)
+                
                 # Set up download expectation BEFORE clicking
                 async with page.expect_download(timeout=20000) as dl_info:
-                    await download_buttons.nth(i).click(timeout=5000)
+                    await download_buttons.nth(btn_idx).click(timeout=5000)
                 
                 dl = await dl_info.value
-                name = dl.suggested_filename or f"bina_{i}.bin"
+                name = dl.suggested_filename or filename_expected or f"bina_{btn_idx}.bin"
                 blob = await dl.content()  # bytes
                 kind = sniff_kind(blob)
                 md5_hash = md5_hex(blob)
@@ -339,16 +432,84 @@ async def bina_fallback_click_downloads(
                 total += 1
                 
                 # Throttle between clicks
-                if throttle_ms and i < n - 1:
+                if throttle_ms and btn_idx < len(buttons_to_click) - 1:
                     await asyncio.sleep(throttle_ms / 1000)
                 
             except Exception as e:
-                logger.warning("click_download.failed retailer=%s idx=%d err=%s", retailer_id, i, str(e))
+                logger.warning("click_download.failed retailer=%s idx=%d filename=%s err=%s", 
+                             retailer_id, btn_idx, filename_expected, str(e))
         
         logger.info("discovery retailer=%s adapter=bina path=click downloads=%d", retailer_id, total)
         return total
     
-    # Strategy 2: Fallback to other button selectors (legacy support)
+    # Strategy 2: Fallback - if no buttons found with today filter, try without filter
+    # But only if we were filtering by today and found nothing
+    if filter_today and not buttons_found_with_filter:
+        logger.debug("bina.trying_without_date_filter retailer=%s", retailer_id)
+        download_buttons_info_no_filter = await bina_collect_download_buttons(page, frame, filter_today=False)
+        if download_buttons_info_no_filter:
+            logger.info("discovery retailer=%s adapter=bina found_buttons_without_filter count=%d", 
+                       retailer_id, len(download_buttons_info_no_filter))
+            # Process buttons without date filter
+            download_buttons = frame.locator("button[onclick*='Download'], button[onclick*='download']")
+            button_count = await download_buttons.count()
+            
+            buttons_to_click = []
+            for btn_info in download_buttons_info_no_filter:
+                btn_idx = btn_info.get('button_index')
+                if btn_idx is not None and btn_idx < button_count:
+                    buttons_to_click.append((btn_idx, btn_info))
+            
+            if max_files > 0:
+                buttons_to_click = buttons_to_click[:max_files]
+            
+            for btn_idx, btn_info in buttons_to_click:
+                try:
+                    filename_expected = btn_info.get('filename', 'unknown')
+                    async with page.expect_download(timeout=20000) as dl_info:
+                        await download_buttons.nth(btn_idx).click(timeout=5000)
+                    dl = await dl_info.value
+                    name = dl.suggested_filename or filename_expected or f"bina_{btn_idx}.bin"
+                    blob = await dl.content()
+                    kind = sniff_kind(blob)
+                    md5_hash = md5_hex(blob)
+                    
+                    if md5_hash in seen_hashes:
+                        continue
+                    
+                    normalized_name = f"{retailer_id}/{name.lower()}"
+                    if normalized_name in seen_names:
+                        continue
+                    
+                    seen_hashes.add(md5_hash)
+                    seen_names.add(normalized_name)
+                    
+                    logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, name, kind, len(blob))
+                    
+                    if bucket:
+                        blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{name}"
+                        await upload_to_gcs(bucket, blob_path, blob, metadata={"md5_hex": md5_hash, "source_filename": name})
+                    
+                    await parse_from_blob(blob, name, retailer_id, run_id)
+                    
+                    if kind == "zip":
+                        result.zips += 1
+                    elif kind == "gz":
+                        result.gz += 1
+                    
+                    total += 1
+                    
+                    if throttle_ms and btn_idx < len(buttons_to_click) - 1:
+                        await asyncio.sleep(throttle_ms / 1000)
+                    
+                except Exception as e:
+                    logger.warning("click_download.failed retailer=%s idx=%d filename=%s err=%s", 
+                                 retailer_id, btn_idx, filename_expected, str(e))
+            
+            logger.info("discovery retailer=%s adapter=bina path=click downloads=%d (no_date_filter)", retailer_id, total)
+            return total
+    
+    # Strategy 3: Fallback to other button selectors (legacy support)
     selectors = [
         "input[id*='btnDownload']",
         "input[type=submit][value*='הורד']",
@@ -466,7 +627,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
             frame = await bina_get_content_frame(page, retailer_id)
             got = await bina_fallback_click_downloads(
                 page, frame, retailer_id, seen_hashes, seen_names, run_id, result, 
-                max_files=len(pseudo_links), throttle_ms=200
+                max_files=0, throttle_ms=200, filter_today=True  # max_files=0 means no limit
             )
             
             if got > 0:
@@ -487,7 +648,7 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                 await page.wait_for_timeout(2000)  # Wait for table to update
                 tab_downloads = await bina_fallback_click_downloads(
                     page, frame, retailer_id, seen_hashes, seen_names, run_id, result, 
-                    max_files=30, throttle_ms=200
+                    max_files=0, throttle_ms=200, filter_today=True  # max_files=0 means no limit
                 )
                 got += tab_downloads
                 if tab_downloads > 0:
