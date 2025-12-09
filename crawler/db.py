@@ -64,10 +64,12 @@ async def upsert_retailer(retailer_id: str, name: str) -> Optional[int]:
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO retailers (slug, name)
-                VALUES ($1, $2)
+                INSERT INTO retailers (slug, name, "createdAt", "updatedAt")
+                VALUES ($1, $2, NOW(), NOW())
                 ON CONFLICT (slug) 
-                DO UPDATE SET name = EXCLUDED.name, "updatedAt" = NOW()
+                DO UPDATE SET 
+                    name = EXCLUDED.name,
+                    "updatedAt" = NOW()
                 RETURNING id
             """, retailer_id, name)
             return row['id'] if row else None
@@ -90,8 +92,8 @@ async def upsert_product(barcode: str, name: str, brand: Optional[str] = None,
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO products (barcode, name, brand, size, unit, category)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO products (barcode, name, brand, size, unit, category, "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
                 ON CONFLICT (barcode) 
                 DO UPDATE SET 
                     name = COALESCE(EXCLUDED.name, products.name),
@@ -127,8 +129,8 @@ async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO price_snapshots 
-                    (product_id, retailer_id, store_id, price, currency, "isOnSale", timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    (product_id, retailer_id, store_id, price, currency, "isOnSale", timestamp, "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
                 RETURNING id
             """, product_id, retailer_id, store_id, price, currency, is_on_sale, timestamp)
             return row['id'] if row else None
