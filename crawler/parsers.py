@@ -9,6 +9,7 @@ from lxml import etree
 from . import logger
 from .archive_utils import iter_xml_entries, sniff_kind, md5_hex
 from .gcs import get_bucket, upload_to_gcs
+from .db import save_parsed_prices
 
 
 def _first_text(elem, *paths) -> Optional[str]:
@@ -88,6 +89,25 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
             
             # Parse XML to JSONL
             rows = parse_prices_xml(xml_bytes, company=retailer_id)
+            
+            # Save to database (if DATABASE_URL is set)
+            if rows:
+                # Get retailer name from config (fallback to retailer_id)
+                retailer_name = retailer_id  # Will be looked up in save_parsed_prices if needed
+                try:
+                    from .config import load_retailers_config
+                    cfg = load_retailers_config()
+                    for r in cfg.get("retailers", []):
+                        if r.get("id") == retailer_id:
+                            retailer_name = r.get("name", retailer_id)
+                            break
+                except Exception:
+                    pass  # Fallback to retailer_id
+                
+                db_saved = await save_parsed_prices(rows, retailer_id, retailer_name)
+                logger.debug("db.save_parsed_prices retailer=%s saved=%d", retailer_id, db_saved)
+            
+            # Also save to GCS JSONL (existing behavior)
             if rows and bucket:
                 jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
                 blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"

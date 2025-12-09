@@ -10,3 +10,4 @@ psutil
 
 google-cloud-storage==2.18.2
 google-cloud-logging==3.11.2
+asyncpg==0.29.0

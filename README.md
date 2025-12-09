@@ -61,6 +61,7 @@
 ### Optional
 - `PRICES_BUCKET` or `BUCKET_NAME` - Fallback bucket names
 - `LOG_LEVEL` - Logging level (default: INFO)
+- `DATABASE_URL` - PostgreSQL connection string (saves parsed data to database)
 
 ## Configuration
 
