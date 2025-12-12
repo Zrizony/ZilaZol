@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 from typing import List, Optional
 
 from lxml import etree
@@ -21,8 +22,20 @@ def _first_text(elem, *paths) -> Optional[str]:
     return None
 
 
-def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
-    """Parse XML bytes into price item rows (PriceFull, PromoFull, StoresFull, generic)."""
+def extract_store_id(filename: str) -> Optional[str]:
+    """
+    Extract Store ID from standard Israeli filename format.
+    Format is typically: [Type]_[ChainID]-[StoreID]-[Date].gz
+    """
+    # Pattern: Matches "7290..." (Chain ID) followed by "-" and "digits" (Store ID)
+    match = re.search(r"(\d+)-(\d+)-\d+", filename)
+    if match:
+        return match.group(2)
+    return None
+
+
+def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> List[dict]:
+    """Parse XML bytes into price item rows with extended metadata."""
     rows: List[dict] = []
     try:
         root = etree.fromstring(xml_bytes)
@@ -34,6 +47,7 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
         items = list(root)
 
     for it in items:
+        # Basic Info
         name = _first_text(
             it,
             "ItemName",
@@ -49,19 +63,40 @@ def parse_prices_xml(xml_bytes: bytes, company: str) -> List[dict]:
         date = _first_text(
             it, "PriceUpdateDate", "UpdateDate", "LastUpdateDate", "date"
         )
+        
+        # Extended Metadata (New)
+        brand = _first_text(it, "ManufacturerName", "ManufactureName", "BrandName")
+        unit = _first_text(it, "UnitQty", "UnitOfMeasure", "UnitName")
+        qty_str = _first_text(it, "Quantity", "Content", "QtyInPackage")
+        weighted_str = _first_text(it, "bIsWeighted", "BisWeighted", "IsWeighted")
 
         if not (barcode or name or price):
             continue
+            
+        # Normalize fields
+        is_weighted = False
+        if weighted_str and weighted_str.lower() in ("1", "true", "y"):
+            is_weighted = True
+            
+        qty = None
+        if qty_str:
+            try:
+                qty = float(qty_str)
+            except ValueError:
+                pass
 
-        rows.append(
-            {
-                "name": name,
-                "barcode": barcode,
-                "date": date,
-                "price": price,
-                "company": company,
-            }
-        )
+        rows.append({
+            "name": name,
+            "barcode": barcode,
+            "date": date,
+            "price": price,
+            "company": company,
+            "store_id": store_id,  # Add store ID to the row
+            "brand": brand,
+            "unit": unit,
+            "size": qty,
+            "is_weighted": is_weighted
+        })
     return rows
 
 
@@ -73,6 +108,9 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
     """
     kind = sniff_kind(data)
     logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename_hint, kind, len(data))
+    
+    # Try to extract store ID from the filename
+    store_ext_id = extract_store_id(filename_hint)
     
     xml_count = 0
     bucket = get_bucket()
@@ -87,13 +125,12 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
                 if bucket:
                     await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
             
-            # Parse XML to JSONL
-            rows = parse_prices_xml(xml_bytes, company=retailer_id)
+            # Parse XML to JSONL with the extracted Store ID
+            rows = parse_prices_xml(xml_bytes, company=retailer_id, store_id=store_ext_id)
             
-            # Save to database (if DATABASE_URL is set)
             if rows:
-                # Get retailer name from config (fallback to retailer_id)
-                retailer_name = retailer_id  # Will be looked up in save_parsed_prices if needed
+                # Get retailer name from config
+                retailer_name = retailer_id
                 try:
                     from .config import load_retailers_config
                     cfg = load_retailers_config()
@@ -102,16 +139,18 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
                             retailer_name = r.get("name", retailer_id)
                             break
                 except Exception:
-                    pass  # Fallback to retailer_id
+                    pass
                 
+                # Save to DB
                 db_saved = await save_parsed_prices(rows, retailer_id, retailer_name)
                 logger.debug("db.save_parsed_prices retailer=%s saved=%d", retailer_id, db_saved)
             
-            # Also save to GCS JSONL (existing behavior)
+            # GCS Upload
             if rows and bucket:
                 jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
                 blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"
                 await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
+                
         except Exception as e:
             logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename_hint, inner_name, e)
     

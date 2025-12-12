@@ -78,9 +78,35 @@ async def upsert_retailer(retailer_id: str, name: str) -> Optional[int]:
         return None
 
 
+async def upsert_store(retailer_db_id: int, external_id: str, name: str = None) -> Optional[int]:
+    """Upsert a store based on external ID (from filename)."""
+    if not external_id:
+        return None
+    
+    pool = await get_pool()
+    if not pool:
+        return None
+    
+    display_name = name or f"Store {external_id}"
+    
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO stores ("retailerId", "externalId", name, "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, NOW(), NOW())
+                ON CONFLICT ("retailerId", "externalId") 
+                DO UPDATE SET "updatedAt" = NOW()
+                RETURNING id
+            """, retailer_db_id, external_id, display_name)
+            return row['id'] if row else None
+    except Exception as e:
+        logger.error("db.store.upsert.failed ext_id=%s error=%s", external_id, str(e))
+        return None
+
+
 async def upsert_product(barcode: str, name: str, brand: Optional[str] = None, 
                          size: Optional[float] = None, unit: Optional[str] = None,
-                         category: Optional[str] = None) -> Optional[int]:
+                         is_weighted: bool = False, category: Optional[str] = None) -> Optional[int]:
     """
     Upsert a product in the database.
     Returns the product's database ID, or None if failed.
@@ -92,18 +118,19 @@ async def upsert_product(barcode: str, name: str, brand: Optional[str] = None,
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO products (barcode, name, brand, size, unit, category, "createdAt", "updatedAt")
-                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                INSERT INTO products (barcode, name, brand, size, unit, "isWeighted", category, "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
                 ON CONFLICT (barcode) 
                 DO UPDATE SET 
                     name = COALESCE(EXCLUDED.name, products.name),
                     brand = COALESCE(EXCLUDED.brand, products.brand),
                     size = COALESCE(EXCLUDED.size, products.size),
                     unit = COALESCE(EXCLUDED.unit, products.unit),
+                    "isWeighted" = COALESCE(EXCLUDED."isWeighted", products."isWeighted"),
                     category = COALESCE(EXCLUDED.category, products.category),
                     "updatedAt" = NOW()
                 RETURNING id
-            """, barcode, name, brand, size, unit, category)
+            """, barcode, name, brand, size, unit, is_weighted, category)
             return row['id'] if row else None
     except Exception as e:
         logger.error("db.product.upsert.failed barcode=%s error=%s", barcode, str(e))
@@ -129,8 +156,8 @@ async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO price_snapshots 
-                    (product_id, retailer_id, store_id, price, currency, "isOnSale", timestamp, "createdAt", "updatedAt")
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+                    (product_id, retailer_id, store_id, price, currency, "isOnSale", timestamp, "createdAt")
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
                 RETURNING id
             """, product_id, retailer_id, store_id, price, currency, is_on_sale, timestamp)
             return row['id'] if row else None
@@ -145,7 +172,7 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
     Save parsed price data to database.
     
     Args:
-        rows: List of dicts with keys: name, barcode, price, date, company
+        rows: List of dicts with keys: name, barcode, price, date, company, store_id, brand, unit, size, is_weighted
         retailer_id: Retailer slug/ID
         retailer_name: Retailer display name
     
@@ -155,13 +182,16 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
     if not rows:
         return 0
     
-    # Upsert retailer first
+    # 1. Upsert Retailer
     db_retailer_id = await upsert_retailer(retailer_id, retailer_name)
     if not db_retailer_id:
         logger.warning("db.save_parsed_prices.skipped retailer=%s reason=retailer_upsert_failed", retailer_id)
         return 0
     
     saved_count = 0
+    
+    # Cache store IDs locally to avoid excessive DB calls
+    store_cache = {}
     
     for row in rows:
         barcode = row.get("barcode", "").strip()
@@ -171,58 +201,61 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
         if not barcode or not name or not price_str:
             continue
         
-        # Parse price
         try:
             price = float(price_str)
         except (ValueError, TypeError):
-            logger.debug("db.price.parse_failed barcode=%s price=%s", barcode, price_str)
             continue
         
-        # Parse date if available
-        timestamp = None
-        date_str = row.get("date")
-        if date_str:
+        timestamp = datetime.utcnow()
+        if row.get("date"):
             try:
-                # Try common date formats
-                for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y", "%d-%m-%Y"]:
+                for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"]:
                     try:
-                        timestamp = datetime.strptime(date_str.strip(), fmt)
+                        timestamp = datetime.strptime(row.get("date").strip(), fmt)
                         break
                     except ValueError:
                         continue
             except Exception:
                 pass
         
-        if timestamp is None:
-            timestamp = datetime.utcnow()
+        # 2. Upsert Store (using store_id from filename)
+        db_store_id = None
+        ext_store_id = row.get("store_id")
         
-        # Upsert product
+        if ext_store_id:
+            if ext_store_id in store_cache:
+                db_store_id = store_cache[ext_store_id]
+            else:
+                db_store_id = await upsert_store(db_retailer_id, ext_store_id)
+                if db_store_id:
+                    store_cache[ext_store_id] = db_store_id
+        
+        # 3. Upsert Product (with extended metadata)
         db_product_id = await upsert_product(
             barcode=barcode,
             name=name,
-            brand=None,  # Could extract from name if needed
-            size=None,
-            unit=None,
+            brand=row.get("brand"),
+            size=row.get("size"),
+            unit=row.get("unit"),
+            is_weighted=row.get("is_weighted", False),
             category=None
         )
         
         if not db_product_id:
             continue
         
-        # Create price snapshot
+        # 4. Create Snapshot (linked to store)
         snapshot_id = await create_price_snapshot(
             product_id=db_product_id,
             retailer_id=db_retailer_id,
+            store_id=db_store_id,
             price=price,
-            currency="ILS",
-            is_on_sale=False,  # Could detect from context
-            timestamp=timestamp,
-            store_id=None  # Could extract/store if available
+            timestamp=timestamp
         )
         
         if snapshot_id:
             saved_count += 1
     
-    logger.info("db.save_parsed_prices retailer=%s saved=%d total=%d", retailer_id, saved_count, len(rows))
+    logger.info("db.saved retailer=%s count=%d/%d", retailer_id, saved_count, len(rows))
     return saved_count
 
