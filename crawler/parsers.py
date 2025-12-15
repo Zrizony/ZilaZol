@@ -94,7 +94,7 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Li
             "store_id": store_id,  # Add store ID to the row
             "brand": brand,
             "unit": unit,
-            "size": qty,
+            "quantity": qty,  # Changed from "size" to "quantity" for normalization
             "is_weighted": is_weighted
         })
     return rows
