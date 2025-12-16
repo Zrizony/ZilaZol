@@ -36,6 +36,7 @@ steps:
           --cpu 4 \
           --timeout 3600 \
           --set-env-vars RELEASE=$COMMIT_SHA,GCS_BUCKET=${_GCS_BUCKET} \
+          --set-secrets="DATABASE_URL=DATABASE_URL:latest" \
           --allow-unauthenticated \
           --project $PROJECT_ID
         echo "Traffic:"

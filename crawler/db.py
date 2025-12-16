@@ -64,8 +64,8 @@ async def upsert_retailer(retailer_id: str, name: str) -> Optional[int]:
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO retailers (slug, name, "createdAt", "updatedAt")
-                VALUES ($1, $2, NOW(), NOW())
+                INSERT INTO retailers (slug, name, "isActive", "createdAt", "updatedAt")
+                VALUES ($1, $2, true, NOW(), NOW())
                 ON CONFLICT (slug) 
                 DO UPDATE SET 
                     name = EXCLUDED.name,
@@ -78,33 +78,35 @@ async def upsert_retailer(retailer_id: str, name: str) -> Optional[int]:
         return None
 
 
-async def upsert_store(retailer_db_id: int, external_id: str, name: str = None) -> Optional[int]:
-    """Upsert a store based on external ID (from filename)."""
-    if not external_id:
-        return None
-    
+async def upsert_store(retailer_db_id: int, external_id: str, name: str = None, 
+                       city: str = None, address: str = None) -> Optional[int]:
+    if not external_id: return None
     pool = await get_pool()
-    if not pool:
-        return None
+    if not pool: return None
     
+    # If name/address provided, update them. If not, preserve existing values.
     display_name = name or f"Store {external_id}"
     
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO stores ("retailerId", "externalId", name, "createdAt", "updatedAt")
-                VALUES ($1, $2, $3, NOW(), NOW())
+                INSERT INTO stores ("retailerId", "externalId", name, city, address, "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
                 ON CONFLICT ("retailerId", "externalId") 
-                DO UPDATE SET "updatedAt" = NOW()
+                DO UPDATE SET 
+                    name = COALESCE(EXCLUDED.name, stores.name),
+                    city = COALESCE(EXCLUDED.city, stores.city),
+                    address = COALESCE(EXCLUDED.address, stores.address),
+                    "updatedAt" = NOW()
                 RETURNING id
-            """, retailer_db_id, external_id, display_name)
+            """, retailer_db_id, external_id, display_name, city, address)
             return row['id'] if row else None
     except Exception as e:
         logger.error("db.store.upsert.failed ext_id=%s error=%s", external_id, str(e))
         return None
 
 
-async def upsert_product(barcode: str, name: str, brand: Optional[str] = None, 
+async def upsert_product(barcode: str, name: Optional[str] = None, brand: Optional[str] = None, 
                          quantity: Optional[float] = None, unit: Optional[str] = None,
                          is_weighted: bool = False, category: Optional[str] = None) -> Optional[int]:
     """
@@ -136,13 +138,13 @@ async def upsert_product(barcode: str, name: str, brand: Optional[str] = None,
         return None
 
 
-async def create_price_snapshot(product_id: int, retailer_id: int, store_id: int, price: float,
-                                currency: str = "ILS", is_on_sale: bool = False,
-                                timestamp: Optional[datetime] = None,
+async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
+                                store_id: Optional[int] = None, currency: str = "ILS", 
+                                is_on_sale: bool = False, timestamp: Optional[datetime] = None,
                                 seen_at: Optional[datetime] = None) -> Optional[int]:
     """
     Create a price snapshot in the database.
-    store_id is now required (mandatory link to specific store).
+    store_id is optional (can be None for general prices).
     Returns the snapshot's database ID, or None if failed.
     """
     pool = await get_pool()
@@ -165,9 +167,27 @@ async def create_price_snapshot(product_id: int, retailer_id: int, store_id: int
             """, product_id, retailer_id, store_id, price, currency, is_on_sale, timestamp, seen_at)
             return row['id'] if row else None
     except Exception as e:
-        logger.error("db.price_snapshot.create.failed product_id=%d retailer_id=%d store_id=%d error=%s", 
+        logger.error("db.price_snapshot.create.failed product_id=%d retailer_id=%d store_id=%s error=%s", 
                     product_id, retailer_id, store_id, str(e))
         return None
+
+
+async def save_parsed_stores(rows: List[Dict], retailer_id: str) -> int:
+    """Bulk saver for Stores files."""
+    db_retailer_id = await upsert_retailer(retailer_id, retailer_id)
+    if not db_retailer_id: return 0
+    
+    count = 0
+    for row in rows:
+        if await upsert_store(
+            retailer_db_id=db_retailer_id,
+            external_id=row.get("external_id"),
+            name=row.get("name"),
+            city=row.get("city"),
+            address=row.get("address")
+        ):
+            count += 1
+    return count
 
 
 async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: str) -> int:
@@ -175,7 +195,7 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
     Save parsed price data to database.
     
     Args:
-        rows: List of dicts with keys: name, barcode, price, date, company, store_id, brand, unit, quantity, is_weighted
+        rows: List of dicts with keys: name, barcode, price, date, company, store_id, brand, unit, quantity, is_weighted, is_on_sale
         retailer_id: Retailer slug/ID
         retailer_name: Retailer display name
     
@@ -201,10 +221,12 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
     
     for row in rows:
         barcode = row.get("barcode", "").strip()
-        name = row.get("name", "").strip()
+        name = row.get("name")
+        if name:
+            name = name.strip()
         price_str = row.get("price", "").strip()
         
-        if not barcode or not name or not price_str:
+        if not barcode or not price_str:
             continue
         
         try:
@@ -225,28 +247,24 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
             except Exception:
                 pass
         
-        # 2. Upsert Store (using store_id from filename) - REQUIRED for Gold Standard
+        # 2. Upsert Store (optional - can be None)
+        db_store_id = None
         ext_store_id = row.get("store_id")
-        if not ext_store_id:
-            logger.debug("db.save_parsed_prices.skipped barcode=%s reason=no_store_id", barcode)
-            continue
         
-        # Get or create store
-        if ext_store_id in store_cache:
-            db_store_id = store_cache[ext_store_id]
-        else:
-            db_store_id = await upsert_store(db_retailer_id, ext_store_id)
-            if not db_store_id:
-                logger.debug("db.save_parsed_prices.skipped barcode=%s reason=store_upsert_failed", barcode)
-                continue
-            store_cache[ext_store_id] = db_store_id
+        if ext_store_id:
+            if ext_store_id in store_cache:
+                db_store_id = store_cache[ext_store_id]
+            else:
+                db_store_id = await upsert_store(db_retailer_id, ext_store_id)
+                if db_store_id:
+                    store_cache[ext_store_id] = db_store_id
         
         # 3. Upsert Product (with normalization fields)
         db_product_id = await upsert_product(
             barcode=barcode,
             name=name,
             brand=row.get("brand"),
-            quantity=row.get("quantity"),  # Changed from "size" to "quantity"
+            quantity=row.get("quantity"),
             unit=row.get("unit"),
             is_weighted=row.get("is_weighted", False),
             category=None
@@ -255,12 +273,13 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
         if not db_product_id:
             continue
         
-        # 4. Create Snapshot (store_id is now mandatory)
+        # 4. Create Snapshot (store_id is optional)
         snapshot_id = await create_price_snapshot(
             product_id=db_product_id,
             retailer_id=db_retailer_id,
-            store_id=db_store_id,  # Required - no longer optional
             price=price,
+            store_id=db_store_id,  # Optional - can be None
+            is_on_sale=row.get("is_on_sale", False),
             timestamp=timestamp,  # When price was reported in file
             seen_at=seen_at  # When we crawled it
         )

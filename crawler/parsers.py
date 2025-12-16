@@ -8,9 +8,9 @@ from typing import List, Optional
 from lxml import etree
 
 from . import logger
-from .archive_utils import iter_xml_entries, sniff_kind, md5_hex
+from .archive_utils import iter_xml_entries, sniff_kind
 from .gcs import get_bucket, upload_to_gcs
-from .db import save_parsed_prices
+from .db import save_parsed_prices, save_parsed_stores
 
 
 def _first_text(elem, *paths) -> Optional[str]:
@@ -23,67 +23,91 @@ def _first_text(elem, *paths) -> Optional[str]:
 
 
 def extract_store_id(filename: str) -> Optional[str]:
-    """
-    Extract Store ID from standard Israeli filename format.
-    Format is typically: [Type]_[ChainID]-[StoreID]-[Date].gz
-    """
-    # Pattern: Matches "7290..." (Chain ID) followed by "-" and "digits" (Store ID)
+    # Matches "7290...-045-2025..." -> returns "045"
     match = re.search(r"(\d+)-(\d+)-\d+", filename)
     if match:
         return match.group(2)
     return None
 
 
+def parse_stores_xml(xml_bytes: bytes) -> List[dict]:
+    """Parses Stores7290...xml to extract store metadata."""
+    rows = []
+    try:
+        root = etree.fromstring(xml_bytes)
+        # Traverse <SubChains> -> <SubChain> -> <Stores> -> <Store>
+        for store in root.findall(".//Store"):
+            ext_id = _first_text(store, "StoreId", "StoreID", "storeid")
+            name = _first_text(store, "StoreName", "StoreNm", "Name")
+            city = _first_text(store, "City", "CityName")
+            address = _first_text(store, "Address", "Street")
+            
+            if ext_id:
+                rows.append({
+                    "external_id": ext_id,
+                    "name": name,
+                    "city": city,
+                    "address": address
+                })
+    except Exception as e:
+        logger.warning(f"Failed to parse stores XML: {e}")
+    return rows
+
+
 def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> List[dict]:
-    """Parse XML bytes into price item rows with extended metadata."""
     rows: List[dict] = []
     try:
         root = etree.fromstring(xml_bytes)
     except Exception:
         return rows
 
+    # 1. Handle PROMOS (Promo/PromoFull) - Nested Structure
+    promotions = root.findall(".//Promotion")
+    if promotions:
+        for promo in promotions:
+            price = _first_text(promo, "DiscountedPrice", "DiscountRate")
+            date = _first_text(promo, "PromotionUpdateDate", "UpdateDate", "PromotionStartDate")
+            
+            for item in promo.findall(".//Item"):
+                barcode = _first_text(item, "ItemCode", "Barcode")
+                if barcode and price:
+                    rows.append({
+                        "barcode": barcode,
+                        "price": price,
+                        "date": date,
+                        "company": company,
+                        "store_id": store_id,
+                        "is_on_sale": True,
+                        "name": None # Promos don't have names
+                    })
+        return rows
+
+    # 2. Handle PRICES (Price/PriceFull) - Flat Structure
     items = root.findall(".//Item")
-    if not items:
-        items = list(root)
+    if not items: items = list(root)
 
     for it in items:
-        # Basic Info
-        name = _first_text(
-            it,
-            "ItemName",
-            "ManufacturerItemDescription",
-            "Description",
-            "itemname",
-            "name",
-        )
-        barcode = _first_text(
-            it, "ItemCode", "Barcode", "ItemBarcode", "itemcode", "barcode", "Code"
-        )
-        price = _first_text(it, "ItemPrice", "Price", "price")
-        date = _first_text(
-            it, "PriceUpdateDate", "UpdateDate", "LastUpdateDate", "date"
-        )
+        name = _first_text(it, "ItemName", "ItemDescription", "Description")
+        barcode = _first_text(it, "ItemCode", "Barcode")
+        price = _first_text(it, "ItemPrice", "Price")
+        date = _first_text(it, "PriceUpdateDate", "UpdateDate")
         
-        # Extended Metadata (New)
-        brand = _first_text(it, "ManufacturerName", "ManufactureName", "BrandName")
-        unit = _first_text(it, "UnitQty", "UnitOfMeasure", "UnitName")
+        # Metadata (Brand, Unit, Qty)
+        brand = _first_text(it, "ManufacturerName", "BrandName")
+        unit = _first_text(it, "UnitQty", "UnitOfMeasure")
         qty_str = _first_text(it, "Quantity", "Content", "QtyInPackage")
-        weighted_str = _first_text(it, "bIsWeighted", "BisWeighted", "IsWeighted")
+        weighted_str = _first_text(it, "bIsWeighted", "BisWeighted")
 
-        if not (barcode or name or price):
-            continue
+        if not (barcode and price): continue
             
-        # Normalize fields
         is_weighted = False
         if weighted_str and weighted_str.lower() in ("1", "true", "y"):
             is_weighted = True
             
         qty = None
         if qty_str:
-            try:
-                qty = float(qty_str)
-            except ValueError:
-                pass
+            try: qty = float(qty_str)
+            except ValueError: pass
 
         rows.append({
             "name": name,
@@ -91,69 +115,52 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Li
             "date": date,
             "price": price,
             "company": company,
-            "store_id": store_id,  # Add store ID to the row
+            "store_id": store_id,
+            "is_on_sale": False,
             "brand": brand,
             "unit": unit,
-            "quantity": qty,  # Changed from "size" to "quantity" for normalization
+            "quantity": qty,
             "is_weighted": is_weighted
         })
     return rows
 
 
 async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run_id: str) -> int:
-    """
-    Unified parse function for all blob types (PriceFull, PromoFull, StoresFull, generic).
-    Logs file.downloaded with sniffed kind, extracts XMLs, parses, and logs file.processed.
-    Returns count of XML entries processed.
-    """
     kind = sniff_kind(data)
     logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, filename_hint, kind, len(data))
-    
-    # Try to extract store ID from the filename
-    store_ext_id = extract_store_id(filename_hint)
     
     xml_count = 0
     bucket = get_bucket()
     
+    # Identify file type
+    is_store_file = "Store" in filename_hint and "Price" not in filename_hint
+    store_ext_id = extract_store_id(filename_hint) if not is_store_file else None
+
     for inner_name, xml_bytes in iter_xml_entries(data, filename_hint=filename_hint):
         xml_count += 1
         try:
-            # Optional: store normalized XML
-            if os.getenv("STORE_NORMALIZED_XML", "0") in ("1", "true", "True"):
-                xml_md5 = md5_hex(xml_bytes)
-                xml_key = f"raw/{retailer_id}/{run_id}/xml/{xml_md5[:2]}/{xml_md5}_{os.path.basename(inner_name)}"
-                if bucket:
-                    await upload_to_gcs(bucket, xml_key, xml_bytes, content_type="application/xml", metadata={"md5_hex": xml_md5, "source_filename": inner_name})
+            rows = []
+            if is_store_file:
+                # Parse Store Metadata
+                rows = parse_stores_xml(xml_bytes)
+                if rows:
+                    await save_parsed_stores(rows, retailer_id)
+                    logger.info("db.saved_stores count=%d", len(rows))
+            else:
+                # Parse Prices/Promos
+                rows = parse_prices_xml(xml_bytes, company=retailer_id, store_id=store_ext_id)
+                if rows:
+                    retailer_name = retailer_id # (Simplify config lookup for brevity)
+                    await save_parsed_prices(rows, retailer_id, retailer_name)
             
-            # Parse XML to JSONL with the extracted Store ID
-            rows = parse_prices_xml(xml_bytes, company=retailer_id, store_id=store_ext_id)
-            
-            if rows:
-                # Get retailer name from config
-                retailer_name = retailer_id
-                try:
-                    from .config import load_retailers_config
-                    cfg = load_retailers_config()
-                    for r in cfg.get("retailers", []):
-                        if r.get("id") == retailer_id:
-                            retailer_name = r.get("name", retailer_id)
-                            break
-                except Exception:
-                    pass
-                
-                # Save to DB
-                db_saved = await save_parsed_prices(rows, retailer_id, retailer_name)
-                logger.debug("db.save_parsed_prices retailer=%s saved=%d", retailer_id, db_saved)
-            
-            # GCS Upload
+            # Upload JSONL to GCS (Optional, for backup)
             if rows and bucket:
                 jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
                 blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"
                 await upload_to_gcs(bucket, blob_path, jsonl_data.encode('utf-8'), "application/json")
                 
         except Exception as e:
-            logger.warning("xml.parse_failed retailer=%s file=%s inner=%s err=%s", retailer_id, filename_hint, inner_name, e)
+            logger.warning("xml.parse_failed retailer=%s file=%s err=%s", retailer_id, filename_hint, e)
     
-    logger.info("file.processed retailer=%s file=%s xml_entries=%d", retailer_id, filename_hint, xml_count)
     return xml_count
 
