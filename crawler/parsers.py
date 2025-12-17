@@ -14,11 +14,17 @@ from .db import save_parsed_prices, save_parsed_stores
 
 
 def _first_text(elem, *paths) -> Optional[str]:
-    """Extract first non-empty text from element using multiple XPath paths."""
+    """
+    Extracts the first non-empty text found.
+    Returns the RAW string (stripped of whitespace).
+    Does NOT filter out '0', 'Unknown', etc.
+    """
     for p in paths:
         r = elem.find(p)
-        if r is not None and (t := (r.text or "").strip()):
-            return t
+        if r is not None and r.text:
+            t = r.text.strip()
+            if t:
+                return t
     return None
 
 
@@ -31,23 +37,17 @@ def extract_store_id(filename: str) -> Optional[str]:
 
 
 def parse_stores_xml(xml_bytes: bytes) -> List[dict]:
-    """Parses Stores7290...xml to extract store metadata."""
     rows = []
     try:
         root = etree.fromstring(xml_bytes)
-        # Traverse <SubChains> -> <SubChain> -> <Stores> -> <Store>
         for store in root.findall(".//Store"):
             ext_id = _first_text(store, "StoreId", "StoreID", "storeid")
-            name = _first_text(store, "StoreName", "StoreNm", "Name")
-            city = _first_text(store, "City", "CityName")
-            address = _first_text(store, "Address", "Street")
-            
             if ext_id:
                 rows.append({
                     "external_id": ext_id,
-                    "name": name,
-                    "city": city,
-                    "address": address
+                    "name": _first_text(store, "StoreName", "StoreNm", "Name"),
+                    "city": _first_text(store, "City", "CityName"),
+                    "address": _first_text(store, "Address", "Street")
                 })
     except Exception as e:
         logger.warning(f"Failed to parse stores XML: {e}")
@@ -61,10 +61,11 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Li
     except Exception:
         return rows
 
-    # 1. Handle PROMOS (Promo/PromoFull) - Nested Structure
+    # 1. Handle PROMOS (Promo/PromoFull)
     promotions = root.findall(".//Promotion")
     if promotions:
         for promo in promotions:
+            # For Promos, the price is the "DiscountedPrice"
             price = _first_text(promo, "DiscountedPrice", "DiscountRate")
             date = _first_text(promo, "PromotionUpdateDate", "UpdateDate", "PromotionStartDate")
             
@@ -77,48 +78,43 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Li
                         "date": date,
                         "company": company,
                         "store_id": store_id,
-                        "is_on_sale": True,
-                        "name": None # Promos don't have names
+                        "is_on_sale": True, # Flag as SALE price
+                        "name": None
                     })
         return rows
 
-    # 2. Handle PRICES (Price/PriceFull) - Flat Structure
+    # 2. Handle PRICES (Price/PriceFull)
     items = root.findall(".//Item")
     if not items: items = list(root)
 
     for it in items:
-        name = _first_text(it, "ItemName", "ItemDescription", "Description")
         barcode = _first_text(it, "ItemCode", "Barcode")
+        # For Regular Price files, the price is "ItemPrice"
         price = _first_text(it, "ItemPrice", "Price")
-        date = _first_text(it, "PriceUpdateDate", "UpdateDate")
         
-        # Metadata (Brand, Unit, Qty)
-        brand = _first_text(it, "ManufacturerName", "BrandName")
-        unit = _first_text(it, "UnitQty", "UnitOfMeasure")
-        qty_str = _first_text(it, "Quantity", "Content", "QtyInPackage")
-        weighted_str = _first_text(it, "bIsWeighted", "BisWeighted")
-
         if not (barcode and price): continue
-            
-        is_weighted = False
-        if weighted_str and weighted_str.lower() in ("1", "true", "y"):
-            is_weighted = True
-            
+
+        qty_str = _first_text(it, "Quantity", "Content", "QtyInPackage")
         qty = None
         if qty_str:
             try: qty = float(qty_str)
             except ValueError: pass
 
+        weighted_str = _first_text(it, "bIsWeighted", "BisWeighted")
+        is_weighted = False
+        if weighted_str and weighted_str.lower() in ("1", "true", "y"):
+            is_weighted = True
+
         rows.append({
-            "name": name,
+            "name": _first_text(it, "ItemName", "ItemNm", "ItemDescription", "Description"),
             "barcode": barcode,
-            "date": date,
+            "date": _first_text(it, "PriceUpdateDate", "UpdateDate"),
             "price": price,
             "company": company,
             "store_id": store_id,
-            "is_on_sale": False,
-            "brand": brand,
-            "unit": unit,
+            "is_on_sale": False, # Flag as REGULAR price
+            "brand": _first_text(it, "ManufacturerName", "BrandName"),
+            "unit": _first_text(it, "UnitQty", "UnitOfMeasure"),
             "quantity": qty,
             "is_weighted": is_weighted
         })
@@ -132,7 +128,7 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
     xml_count = 0
     bucket = get_bucket()
     
-    # Identify file type
+    # Store files have "Store" in name but NOT "Price" (to distinguish from StorePrice files if any)
     is_store_file = "Store" in filename_hint and "Price" not in filename_hint
     store_ext_id = extract_store_id(filename_hint) if not is_store_file else None
 
@@ -141,19 +137,15 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
         try:
             rows = []
             if is_store_file:
-                # Parse Store Metadata
                 rows = parse_stores_xml(xml_bytes)
                 if rows:
                     await save_parsed_stores(rows, retailer_id)
-                    logger.info("db.saved_stores count=%d", len(rows))
             else:
-                # Parse Prices/Promos
                 rows = parse_prices_xml(xml_bytes, company=retailer_id, store_id=store_ext_id)
                 if rows:
-                    retailer_name = retailer_id # (Simplify config lookup for brevity)
+                    retailer_name = retailer_id 
                     await save_parsed_prices(rows, retailer_id, retailer_name)
             
-            # Upload JSONL to GCS (Optional, for backup)
             if rows and bucket:
                 jsonl_data = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
                 blob_path = f"json/{retailer_id}/{os.path.splitext(inner_name)[0]}.jsonl"
