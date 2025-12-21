@@ -11,7 +11,6 @@ from ..constants import SCREENSHOTS_DIR, DEFAULT_DOWNLOAD_SUFFIXES
 from ..models import RetailerResult
 from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
-from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
 from ..utils import ensure_dirs, looks_like_price_file
 from ..memory_utils import log_memory
@@ -105,7 +104,6 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
         
         # Process each link
         log_memory(logger, f"generic.before_downloads retailer={retailer_id} links={len(links)}")
-        bucket = get_bucket()
         for link in links:
             filename = link.split('/')[-1] or link  # Fallback for error logging
             try:
@@ -127,11 +125,6 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
                 # Add to seen sets
                 seen_hashes.add(md5_hash)
                 seen_names.add(normalized_name)
-                
-                # Upload to GCS
-                if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
-                    await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
                 # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
                 await parse_from_blob(data, filename, retailer_id, run_id)

@@ -78,7 +78,7 @@ async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO price_snapshots 
-                (product_id, retailer_id, store_id, price, "isOnSale", timestamp, "seenAt")
+                ("productId", "retailerId", "storeId", price, "isOnSale", timestamp, "seenAt")
             VALUES ($1, $2, $3, $4, $5, $6, NOW())
             RETURNING id
         """, product_id, retailer_id, store_id, price, is_on_sale, timestamp)
@@ -148,3 +148,32 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
 
     logger.info(f"db.saved retailer={retailer_id} count={saved_count}/{len(rows)}")
     return saved_count
+
+
+async def fetch_stores_with_retailer() -> List[Dict]:
+    """Fetch all stores with their retailer information."""
+    pool = await get_pool()
+    if not pool: return []
+    
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT 
+                    s.id,
+                    s."externalId",
+                    s.name,
+                    s.city,
+                    s.address,
+                    s."createdAt",
+                    s."updatedAt",
+                    r.id as "retailerId",
+                    r.name as "retailerName",
+                    r.slug as "retailerSlug"
+                FROM stores s
+                INNER JOIN retailers r ON s."retailerId" = r.id
+                ORDER BY s."createdAt" DESC
+            """)
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"db.fetch_stores.failed error={e}")
+        return []

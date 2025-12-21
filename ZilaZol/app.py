@@ -4,19 +4,15 @@ import os
 import asyncio
 import threading
 from flask import Flask, jsonify, request, current_app
-from google.cloud import storage
 
 from crawler.core import run_all
 from crawler import logger
-from crawler.constants import BUCKET
 from version import VERSION
-from crawler.env import get_bucket
 from crawler.config import load_retailers_config, get_retailers
 
 app = Flask(__name__)
 
 logger.info("startup version=%s", VERSION)
-logger.info("bucket.config=%s", get_bucket() or "NONE")
 
 
 def _run_crawler_background(retailers, group_for_log):
@@ -295,9 +291,7 @@ def __version():
 def __env():
     import os
     visible = [
-        "GCS_BUCKET",
-        "PRICES_BUCKET",
-        "BUCKET_NAME",
+        "DATABASE_URL",
         "LOG_LEVEL",
         "RELEASE",
         "COMMIT_SHA",
@@ -307,21 +301,15 @@ def __env():
 
 @app.route("/__smoke", methods=["POST"])
 def __smoke():
-    import time, hashlib
-    bkt_name = get_bucket()
-    if not bkt_name:
-        return jsonify(ok=False, error="No bucket configured (GCS_BUCKET/PRICES_BUCKET/BUCKET_NAME)."), 500
-    payload = f"ok:{time.time()}".encode()
-    md5 = hashlib.md5(payload).hexdigest()
-    key = f"smoke/{VERSION}/{md5}.txt"
+    """Health check endpoint - verifies database connectivity"""
     try:
-        client = storage.Client()
-        bucket = client.bucket(bkt_name)
-        blob = bucket.blob(key)
-        blob.metadata = {"md5_hex": md5}
-        blob.upload_from_string(payload, content_type="text/plain")
-        logger.info("smoke.uploaded bucket=%s key=%s", bkt_name, key)
-        return jsonify(ok=True, bucket=bkt_name, key=key)
+        from crawler.db import get_pool
+        import asyncio
+        pool = asyncio.run(get_pool())
+        if pool:
+            return jsonify(ok=True, message="Database connection available")
+        else:
+            return jsonify(ok=False, error="Database connection not available"), 500
     except Exception as e:
         current_app.logger.exception("smoke_failed")
         return jsonify(ok=False, error=str(e)), 500

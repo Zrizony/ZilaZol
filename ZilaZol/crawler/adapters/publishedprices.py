@@ -12,7 +12,6 @@ from ..constants import DEFAULT_DOWNLOAD_SUFFIXES
 from ..models import RetailerResult
 from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
-from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
 from ..utils import looks_like_price_file
 
@@ -421,8 +420,6 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
         # Step 4: Download and process files
         seen_hashes: Set[str] = set()
         seen_names: Set[str] = set()
-        manifest_entries: List[dict] = []
-        bucket = get_bucket()
         
         for link in links:
             filename = link.split('/')[-1] or link  # Fallback for error logging
@@ -447,22 +444,6 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 seen_hashes.add(md5_hash)
                 seen_names.add(normalized_name)
                 
-                # Upload to GCS with new path structure
-                if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
-                    await upload_to_gcs(bucket, blob_path, data, md5_hex=md5_hash, metadata={"source_filename": filename})
-                    
-                    # Add to manifest
-                    manifest_entries.append({
-                        "filename": filename,
-                        "gcs_path": blob_path,
-                        "md5_hex": md5_hash,
-                        "bytes": len(data),
-                        "ts": datetime.now(timezone.utc).isoformat()
-                    })
-                    
-                    logger.info("upload.ok retailer=%s file=%s gcs_path=%s", retailer_id, filename, blob_path)
-                
                 # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
                 await parse_from_blob(data, filename, retailer_id, run_id)
                 
@@ -475,26 +456,9 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
                 
             except Exception as e:
                 result.errors.append(f"download_error:{link}:{e}")
-                logger.error("upload.failed retailer=%s link=%s file=%s err=%s", retailer_id, link, filename, str(e))
+                logger.error("download.failed retailer=%s link=%s file=%s err=%s", retailer_id, link, filename, str(e))
                 continue
         
-        # Write manifest.json
-        if manifest_entries and bucket:
-            try:
-                manifest_data = json.dumps({
-                    "run_id": run_id,
-                    "retailer_id": retailer_id,
-                    "retailer_name": retailer.get("name", "Unknown"),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "files": manifest_entries
-                }, indent=2)
-                
-                manifest_path = f"raw/{retailer_id}/{run_id}/manifest.json"
-                await upload_to_gcs(bucket, manifest_path, manifest_data.encode('utf-8'), "application/json")
-                logger.info("manifest.written retailer=%s run_id=%s files=%d", retailer_id, run_id, len(manifest_entries))
-            except Exception as e:
-                logger.error("manifest.failed retailer=%s err=%s", retailer_id, str(e))
-                
     except Exception as e:
         result.errors.append(f"fatal:{e}")
         logger.error("adapter=publishedprices retailer=%s error=%s", retailer_id, str(e))

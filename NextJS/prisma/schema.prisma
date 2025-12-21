@@ -1,0 +1,77 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Retailer {
+  id        Int      @id @default(autoincrement())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  stores    Store[]
+  prices    PriceSnapshot[]
+
+  @@map("retailers")
+}
+
+model Store {
+  id          Int      @id @default(autoincrement())
+  retailerId  Int
+  externalId  String   // e.g. "004"
+  name        String?
+  city        String?  // Allows "0" or "Tel Aviv"
+  address     String?  // Allows "unknown"
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  retailer    Retailer @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+  prices      PriceSnapshot[]
+  
+  @@unique([retailerId, externalId])
+  @@map("stores")
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  barcode     String   @unique
+  name        String?
+  brand       String?  // e.g. "Osem" or "לא ידוע"
+  quantity    Float?   // e.g. 500.0
+  unit        String?  // e.g. "grams"
+  isWeighted  Boolean  @default(false)
+  category    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  prices      PriceSnapshot[]
+
+  @@map("products")
+}
+
+model PriceSnapshot {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+  retailerId Int
+  storeId    Int?     // Mandatory for valid price context
+  price      Float
+  currency   String   @default("ILS")
+  isOnSale   Boolean  @default(false)
+  timestamp  DateTime 
+  seenAt     DateTime @default(now())
+  
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  retailer   Retailer @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+  store      Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
+
+  @@index([productId, storeId])
+  @@index([timestamp])
+  @@map("price_snapshots")
+}

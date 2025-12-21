@@ -9,7 +9,7 @@ from typing import List, Set
 from playwright.async_api import async_playwright
 
 from . import logger
-from .constants import BUCKET, PUBLISHED_HOST
+from .constants import PUBLISHED_HOST
 from .credentials import CREDS
 from .models import RetailerResult
 from .playwright_helpers import new_context
@@ -128,8 +128,7 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     logger.info("run.start run_id=%s retailers=%d concurrency_limit=3", run_id, len(retailers))
     log_memory(logger, f"run.start run_id={run_id}")
     
-    # Warn if BUCKET is missing
-    if not BUCKET:
+    # All data is saved directly to database
         logger.warning("No bucket configured - GCS uploads will be skipped")
 
     # Semaphore to limit concurrent crawlers (prevents OOM from too many browsers)
@@ -189,58 +188,5 @@ async def run_all(retailers: List[dict]) -> List[dict]:
                     "reasons": result.reasons,
                     "errors": result.errors if result.errors else []
                 })
-    
-    # Generate and upload per-run manifest with retry and timeout protection
-    if BUCKET:
-        try:
-            from .gcs import get_bucket, upload_to_gcs
-            import json
-            
-            manifest = {
-                "run_id": run_id,
-                "started_at": started_at,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "retailers": manifest_retailers,
-                "summary": {
-                    "total_retailers": len(manifest_retailers),
-                    "total_links": sum(r.get("links", 0) for r in manifest_retailers),
-                    "total_downloads": sum(r.get("downloads", 0) for r in manifest_retailers),
-                    "total_skipped_dupes": sum(r.get("skipped_dupes", 0) for r in manifest_retailers)
-                }
-            }
-            
-            bucket = get_bucket()
-            if bucket:
-                manifest_key = f"manifests/{run_id}.json"
-                manifest_data = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
-                
-                # Upload with timeout protection (30s) and retry logic
-                max_retries = 3
-                uploaded = False
-                for attempt in range(max_retries):
-                    try:
-                        # Upload with timeout protection
-                        await asyncio.wait_for(
-                            upload_to_gcs(bucket, manifest_key, manifest_data, content_type="application/json"),
-                            timeout=30.0
-                        )
-                        logger.info("run.manifest bucket=%s key=%s retailers=%d", BUCKET, manifest_key, len(manifest_retailers))
-                        uploaded = True
-                        break
-                    except asyncio.TimeoutError:
-                        logger.warning("run.manifest.timeout attempt=%d/%d key=%s", attempt+1, max_retries, manifest_key)
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2 ** attempt)  # Exponential backoff
-                    except Exception as e:
-                        logger.warning("run.manifest.retry attempt=%d/%d error=%s", attempt+1, max_retries, str(e))
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2 ** attempt)  # Exponential backoff
-                        else:
-                            raise
-                
-                if not uploaded:
-                    logger.error("run.manifest.failed_all_retries key=%s", manifest_key)
-        except Exception as e:
-            logger.error("run.manifest.failed error=%s", str(e))
     
     return out

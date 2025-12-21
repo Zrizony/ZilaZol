@@ -12,7 +12,6 @@ from .. import logger
 from ..models import RetailerResult
 from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
-from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
 from ..memory_utils import log_memory
 from .generic import collect_links_on_page
@@ -350,7 +349,6 @@ async def bina_fallback_click_downloads(
     from datetime import datetime
     
     total = 0
-    bucket = get_bucket()
     today_str = datetime.now().strftime("%d/%m/%Y")
     
     # Strategy 1: Find Download() buttons filtered by today's date (PRIMARY)
@@ -414,11 +412,6 @@ async def bina_fallback_click_downloads(
                 seen_names.add(normalized_name)
                 
                 logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, name, kind, len(blob))
-                
-                # Upload to GCS
-                if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{name}"
-                    await upload_to_gcs(bucket, blob_path, blob, metadata={"md5_hex": md5_hash, "source_filename": name})
                 
                 # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
                 await parse_from_blob(blob, name, retailer_id, run_id)
@@ -486,10 +479,6 @@ async def bina_fallback_click_downloads(
                     
                     logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, name, kind, len(blob))
                     
-                    if bucket:
-                        blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{name}"
-                        await upload_to_gcs(bucket, blob_path, blob, metadata={"md5_hex": md5_hash, "source_filename": name})
-                    
                     await parse_from_blob(blob, name, retailer_id, run_id)
                     
                     if kind == "zip":
@@ -553,10 +542,6 @@ async def bina_fallback_click_downloads(
             seen_names.add(normalized_name)
             
             logger.info("file.downloaded retailer=%s file=%s kind=%s bytes=%d", retailer_id, name, kind, len(blob))
-            
-            if bucket:
-                blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{name}"
-                await upload_to_gcs(bucket, blob_path, blob, metadata={"md5_hex": md5_hash, "source_filename": name})
             
             await parse_from_blob(blob, name, retailer_id, run_id)
             
@@ -661,7 +646,6 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
         
         # Process each REAL link (skip pseudo-links - they're already handled above)
         log_memory(logger, f"bina.before_downloads retailer={retailer_id} links={len(real_links)}")
-        bucket = get_bucket()
         for link in real_links:
             filename = link.split('/')[-1] or link  # Fallback for error logging
             try:
@@ -683,11 +667,6 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
                 # Add to seen sets
                 seen_hashes.add(md5_hash)
                 seen_names.add(normalized_name)
-                
-                # Upload to GCS
-                if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
-                    await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
                 # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
                 await parse_from_blob(data, filename, retailer_id, run_id)

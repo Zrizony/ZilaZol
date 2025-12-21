@@ -5,7 +5,6 @@ from typing import List, Optional
 from lxml import etree
 from . import logger
 from .archive_utils import iter_xml_entries, sniff_kind
-from .gcs import get_bucket, upload_to_gcs
 from .db import save_parsed_prices, save_parsed_stores
 
 

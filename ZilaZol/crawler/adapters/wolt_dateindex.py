@@ -11,7 +11,6 @@ from .. import logger
 from ..models import RetailerResult
 from ..archive_utils import sniff_kind, md5_hex
 from ..download import fetch_url
-from ..gcs import get_bucket, upload_to_gcs
 from ..parsers import parse_from_blob
 
 
@@ -130,8 +129,6 @@ async def wolt_dateindex_adapter(
         logger.info("links.discovered slug=%s adapter=wolt_dateindex count=%d", retailer_id, len(links))
         
         # Step 3: Download and process files
-        bucket = get_bucket()
-        
         for link in links:
             filename = link.split('/')[-1] or link
             try:
@@ -154,11 +151,6 @@ async def wolt_dateindex_adapter(
                 # Add to seen sets
                 seen_hashes.add(md5_hash)
                 seen_names.add(normalized_name)
-                
-                # Upload to GCS
-                if bucket:
-                    blob_path = f"raw/{retailer_id}/{run_id}/{md5_hash}_{filename}"
-                    await upload_to_gcs(bucket, blob_path, data, metadata={"md5_hex": md5_hash, "source_filename": filename})
                 
                 # Unified parse (logs file.downloaded, extracts, parses, logs file.processed)
                 await parse_from_blob(data, filename, retailer_id, run_id)
