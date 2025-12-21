@@ -8,7 +8,7 @@ on:
 
 jobs:
   crawl:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
@@ -25,18 +25,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Install Playwright browsers and system dependencies
+      - name: Install Playwright system dependencies
+        working-directory: ZilaZol
+        run: |
+          npx playwright install-deps
+      
+      - name: Install Playwright browsers
         working-directory: ZilaZol
         run: |
           playwright install chromium
-          playwright install-deps chromium
       
       - name: Run crawler
         working-directory: ZilaZol
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           LOG_LEVEL: INFO
+          PYTHONPATH: ${{ github.workspace }}/ZilaZol
         run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "Error: DATABASE_URL secret is not set"
+            exit 1
+          fi
           python run_crawler.py
       
       - name: Upload logs on failure
