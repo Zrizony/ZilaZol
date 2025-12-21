@@ -129,8 +129,6 @@ async def run_all(retailers: List[dict]) -> List[dict]:
     log_memory(logger, f"run.start run_id={run_id}")
     
     # All data is saved directly to database
-        logger.warning("No bucket configured - GCS uploads will be skipped")
-
     # Semaphore to limit concurrent crawlers (prevents OOM from too many browsers)
     sem = asyncio.Semaphore(3)
     
