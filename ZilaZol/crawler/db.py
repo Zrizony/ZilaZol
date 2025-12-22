@@ -15,6 +15,13 @@ async def get_pool() -> Optional[asyncpg.Pool]:
     _pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"), min_size=1, max_size=5)
     return _pool
 
+async def close_pool():
+    """Close the database connection pool"""
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+
 async def upsert_retailer(retailer_id: str, name: str) -> Optional[int]:
     pool = await get_pool()
     if not pool: return None
