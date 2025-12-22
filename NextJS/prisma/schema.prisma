@@ -15,6 +15,7 @@ model Retailer {
   name      String
   slug      String   @unique
   isActive  Boolean  @default(true)
+  needCreds Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   

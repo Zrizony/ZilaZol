@@ -22,17 +22,61 @@ async def close_pool():
         await _pool.close()
         _pool = None
 
-async def upsert_retailer(retailer_id: str, name: str) -> Optional[int]:
+async def upsert_retailer(retailer_id: str, name: str, need_creds: Optional[bool] = None) -> Optional[int]:
+    """
+    Upsert retailer. If need_creds is None, preserve existing value on update.
+    """
     pool = await get_pool()
     if not pool: return None
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO retailers (slug, name, "createdAt", "updatedAt")
-            VALUES ($1, $2, NOW(), NOW())
-            ON CONFLICT (slug) DO UPDATE SET "updatedAt" = NOW()
-            RETURNING id
-        """, retailer_id, name)
+        if need_creds is None:
+            # Don't update needCreds - preserve existing value
+            row = await conn.fetchrow("""
+                INSERT INTO retailers (slug, name, "needCreds", "createdAt", "updatedAt")
+                VALUES ($1, $2, false, NOW(), NOW())
+                ON CONFLICT (slug) DO UPDATE SET 
+                    name = EXCLUDED.name,
+                    "updatedAt" = NOW()
+                RETURNING id
+            """, retailer_id, name)
+        else:
+            # Update needCreds explicitly
+            row = await conn.fetchrow("""
+                INSERT INTO retailers (slug, name, "needCreds", "createdAt", "updatedAt")
+                VALUES ($1, $2, $3, NOW(), NOW())
+                ON CONFLICT (slug) DO UPDATE SET 
+                    name = EXCLUDED.name,
+                    "needCreds" = EXCLUDED."needCreds",
+                    "updatedAt" = NOW()
+                RETURNING id
+            """, retailer_id, name, need_creds)
         return row['id'] if row else None
+
+async def fetch_retailer_slugs(need_creds: Optional[bool] = None) -> List[str]:
+    """Fetch retailer slugs from database, optionally filtered by needCreds"""
+    pool = await get_pool()
+    if not pool: return []
+    
+    try:
+        async with pool.acquire() as conn:
+            if need_creds is None:
+                # Fetch all enabled retailers
+                rows = await conn.fetch("""
+                    SELECT slug FROM retailers 
+                    WHERE "isActive" = true
+                    ORDER BY slug
+                """)
+            else:
+                # Filter by needCreds
+                rows = await conn.fetch("""
+                    SELECT slug FROM retailers 
+                    WHERE "isActive" = true AND "needCreds" = $1
+                    ORDER BY slug
+                """, need_creds)
+            return [row['slug'] for row in rows]
+    except Exception as e:
+        logger.error(f"db.fetch_retailer_slugs.failed error={e}")
+        return []
 
 async def upsert_store(retailer_db_id: int, external_id: str, name: str = None, 
                        city: str = None, address: str = None) -> Optional[int]:

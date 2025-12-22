@@ -2,15 +2,22 @@
 """
 Standalone script to run the crawler.
 Used by GitHub Actions for scheduled crawls.
+
+Usage:
+    python run_crawler.py --type=public   # Crawl only public retailers (no login)
+    python run_crawler.py --type=auth     # Crawl only authenticated retailers (login required)
+    python run_crawler.py                 # Crawl all retailers (default)
 """
 from __future__ import annotations
+import argparse
 import asyncio
 import sys
 import json
 from pathlib import Path
+from typing import Optional
 from crawler.core import run_all
-from crawler.config import get_retailers
-from crawler.db import upsert_retailer, get_pool, close_pool
+from crawler.config import get_retailers, _requires_credentials
+from crawler.db import upsert_retailer, get_pool, close_pool, fetch_retailer_slugs
 from crawler import logger
 
 async def sync_retailers_from_json():
@@ -34,7 +41,8 @@ async def sync_retailers_from_json():
             retailer_name = retailer.get("name")
             
             if retailer_id and retailer_name and retailer.get("enabled", True):
-                db_id = await upsert_retailer(retailer_id, retailer_name)
+                need_creds = _requires_credentials(retailer)
+                db_id = await upsert_retailer(retailer_id, retailer_name, need_creds)
                 if db_id:
                     synced += 1
         
@@ -42,20 +50,75 @@ async def sync_retailers_from_json():
     except Exception as e:
         logger.warning(f"Retailer sync failed (continuing anyway): {e}")
 
+async def get_retailers_for_crawl(crawl_type: Optional[str] = None):
+    """
+    Get retailers for crawling, filtered by type.
+    
+    Args:
+        crawl_type: 'public' (no login), 'auth' (login required), or None (all)
+    
+    Returns:
+        List of retailer config dictionaries from JSON, filtered by DB needCreds flag
+    """
+    # Sync retailers from JSON to DB first (ensures DB is up to date)
+    await sync_retailers_from_json()
+    
+    # Fetch retailer slugs from database filtered by needCreds
+    pool = await get_pool()
+    if not pool:
+        logger.warning("Database not available - falling back to JSON config")
+        # Fallback to JSON-based filtering
+        if crawl_type == "public":
+            return [r for r in get_retailers("public") if r.get("enabled", True)]
+        elif crawl_type == "auth":
+            return [r for r in get_retailers("creds") if r.get("enabled", True)]
+        else:
+            return [r for r in get_retailers() if r.get("enabled", True)]
+    
+    # Determine filter based on crawl_type
+    need_creds_filter = None
+    if crawl_type == "public":
+        need_creds_filter = False
+    elif crawl_type == "auth":
+        need_creds_filter = True
+    # If crawl_type is None, need_creds_filter stays None (fetch all)
+    
+    # Fetch slugs from database
+    db_slugs = await fetch_retailer_slugs(need_creds_filter)
+    logger.info(f"Found {len(db_slugs)} retailers in database (type={crawl_type or 'all'})")
+    
+    # Load full retailer configs from JSON for those slugs
+    all_retailers = get_retailers()
+    retailers_by_slug = {r.get("id"): r for r in all_retailers}
+    
+    # Filter to only enabled retailers that exist in DB
+    filtered_retailers = []
+    for slug in db_slugs:
+        retailer = retailers_by_slug.get(slug)
+        if retailer and retailer.get("enabled", True):
+            filtered_retailers.append(retailer)
+    
+    return filtered_retailers
+
 async def main():
-    """Run crawler for all enabled retailers"""
+    """Run crawler for retailers filtered by type"""
+    parser = argparse.ArgumentParser(description="Run price crawler")
+    parser.add_argument(
+        "--type",
+        choices=["public", "auth"],
+        help="Crawl type: 'public' (no login) or 'auth' (login required)"
+    )
+    args = parser.parse_args()
+    
     try:
-        # Sync retailers from JSON to database first
-        await sync_retailers_from_json()
-        
-        # Get all enabled retailers
-        retailers = [r for r in get_retailers() if r.get("enabled", True)]
+        # Get retailers filtered by type
+        retailers = await get_retailers_for_crawl(args.type)
         
         if not retailers:
-            logger.warning("No enabled retailers found")
+            logger.warning(f"No enabled retailers found for type={args.type or 'all'}")
             sys.exit(0)
         
-        logger.info("crawler.start retailers=%d", len(retailers))
+        logger.info(f"crawler.start type={args.type or 'all'} retailers={len(retailers)}")
         
         # Run crawler
         results = await run_all(retailers)
