@@ -114,6 +114,12 @@ async def main():
         type=str,
         help="Crawl a single retailer by slug (e.g., 'shufersal', 'ramilevi')"
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,  # 5 hours default timeout per retailer
+        help="Timeout in minutes for crawling a single retailer (default: 300 = 5 hours)"
+    )
     args = parser.parse_args()
     
     try:
@@ -135,7 +141,7 @@ async def main():
                 sys.exit(1)
             
             retailers = [retailer_config]
-            logger.info(f"crawler.start retailer={args.retailer}")
+            logger.info(f"crawler.start retailer={args.retailer} timeout={args.timeout}min")
         else:
             # Get retailers filtered by type
             retailers = await get_retailers_for_crawl(args.type)
@@ -144,14 +150,19 @@ async def main():
                 logger.warning(f"No enabled retailers found for type={args.type or 'all'}")
                 sys.exit(0)
             
-            logger.info(f"crawler.start type={args.type or 'all'} retailers={len(retailers)}")
+            logger.info(f"crawler.start type={args.type or 'all'} retailers={len(retailers)} timeout={args.timeout}min")
         
         if not retailers:
             logger.warning(f"No retailers to crawl")
             sys.exit(0)
         
-        # Run crawler
-        results = await run_all(retailers)
+        # Run crawler with timeout
+        timeout_seconds = args.timeout * 60
+        try:
+            results = await asyncio.wait_for(run_all(retailers), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.error(f"crawler.timeout exceeded timeout={args.timeout}min retailers={len(retailers)}")
+            sys.exit(1)
         
         # Count successes and errors
         success_count = sum(1 for r in results if not r.get("errors"))
