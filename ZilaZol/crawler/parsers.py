@@ -32,11 +32,27 @@ def parse_stores_xml(xml_bytes: bytes) -> List[dict]:
         for store in root.findall(".//Store"):
             ext_id = _first_text(store, "StoreId", "StoreID", "storeid")
             if ext_id:
+                # Try multiple possible address field names (English and Hebrew)
+                address = (
+                    _first_text(store, "Address", "Street", "StoreAddress", 
+                               "AddressLine1", "FullAddress", "Location", 
+                               "StreetAddress", "Addr", "StoreLocation",
+                               "כתובת", "רחוב", "מיקום", "כתובת_סניף")  # Hebrew: address, street, location
+                )
+                city = _first_text(store, "City", "CityName", "StoreCity",
+                                   "עיר", "יישוב")  # Hebrew: city, settlement
+                name = _first_text(store, "StoreName", "StoreNm", "Name", "StoreName",
+                                  "שם_סניף", "סניף", "שם")  # Hebrew: branch name, branch, name
+                
+                # Log if we found address data
+                if address or city:
+                    logger.info(f"parse_stores_xml found store ext_id={ext_id} name={name} city={city} address={address}")
+                
                 rows.append({
                     "external_id": ext_id,
-                    "name": _first_text(store, "StoreName", "StoreNm", "Name"),
-                    "city": _first_text(store, "City", "CityName"),
-                    "address": _first_text(store, "Address", "Street")
+                    "name": name,
+                    "city": city,
+                    "address": address
                 })
     except Exception as e:
         logger.warning(f"Failed to parse stores XML: {e}")
@@ -62,9 +78,15 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
     # Some retailers embed store info in price XML files
     # First try to extract from root level tags
     store_metadata["store_id"] = store_id or _first_text(root, "StoreId", "StoreID", "storeid")
-    store_metadata["name"] = _first_text(root, "StoreName", "StoreNm", "Name", "StoreName")
-    store_metadata["city"] = _first_text(root, "City", "CityName")
-    store_metadata["address"] = _first_text(root, "Address", "Street", "StoreAddress")
+    store_metadata["name"] = _first_text(root, "StoreName", "StoreNm", "Name", "StoreName",
+                                        "שם_סניף", "סניף", "שם")  # Hebrew: branch name, branch, name
+    store_metadata["city"] = _first_text(root, "City", "CityName", "StoreCity",
+                                        "עיר", "יישוב")  # Hebrew: city, settlement
+    # Try multiple possible address field names (English and Hebrew)
+    store_metadata["address"] = _first_text(root, "Address", "Street", "StoreAddress",
+                                            "AddressLine1", "FullAddress", "Location",
+                                            "StreetAddress", "Addr", "StoreLocation",
+                                            "כתובת", "רחוב", "מיקום", "כתובת_סניף")  # Hebrew: address, street, location
 
     # Also check for store info in a Store element at root level (takes precedence)
     store_elem = root.find(".//Store")
@@ -73,15 +95,26 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
         extracted_store_id = _first_text(store_elem, "StoreId", "StoreID", "storeid")
         if extracted_store_id:
             store_metadata["store_id"] = extracted_store_id
-        extracted_name = _first_text(store_elem, "StoreName", "StoreNm", "Name")
+        extracted_name = _first_text(store_elem, "StoreName", "StoreNm", "Name",
+                                     "שם_סניף", "סניף", "שם")  # Hebrew: branch name, branch, name
         if extracted_name:
             store_metadata["name"] = extracted_name
-        extracted_city = _first_text(store_elem, "City", "CityName")
+        extracted_city = _first_text(store_elem, "City", "CityName", "StoreCity",
+                                     "עיר", "יישוב")  # Hebrew: city, settlement
         if extracted_city:
             store_metadata["city"] = extracted_city
-        extracted_address = _first_text(store_elem, "Address", "Street", "StoreAddress")
+        # Try multiple address field names (English and Hebrew)
+        extracted_address = _first_text(store_elem, "Address", "Street", "StoreAddress",
+                                       "AddressLine1", "FullAddress", "Location",
+                                       "StreetAddress", "Addr", "StoreLocation",
+                                       "כתובת", "רחוב", "מיקום", "כתובת_סניף")  # Hebrew: address, street, location
         if extracted_address:
             store_metadata["address"] = extracted_address
+    
+    # Log if we found store metadata
+    if store_metadata.get("address") or store_metadata.get("city"):
+        logger.info(f"parse_prices_xml extracted store metadata: store_id={store_metadata.get('store_id')} "
+                   f"city={store_metadata.get('city')} address={store_metadata.get('address')}")
 
     # Use store_id from metadata if we found it and it wasn't passed in
     effective_store_id = store_metadata.get("store_id") or store_id
@@ -97,6 +130,10 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
         for item in promo.findall(".//Item"):
             barcode = _first_text(item, "ItemCode", "Barcode")
             if barcode:
+                # Extract image URL if available
+                image_url = _first_text(item, "ItemImage", "Image", "ImageUrl", "ImageURL",
+                                       "Picture", "PictureUrl", "Photo", "PhotoUrl",
+                                       "תמונה", "קישור_תמונה")  # Hebrew: image, image link
                 rows.append({
                     "barcode": barcode,
                     "price": price,
@@ -104,7 +141,8 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
                     "company": company,
                     "store_id": effective_store_id,
                     "is_on_sale": True,
-                    "name": None # Promos often lack names
+                    "name": None, # Promos often lack names
+                    "image_url": image_url
                 })
 
     # 2. Handle PRICES (Price/PriceFull)
@@ -128,6 +166,11 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
         weighted_str = _first_text(it, "bIsWeighted", "BisWeighted")
         is_weighted = (weighted_str and weighted_str.lower() in ("1", "true", "y"))
 
+        # Extract image URL if available
+        image_url = _first_text(it, "ItemImage", "Image", "ImageUrl", "ImageURL", 
+                               "Picture", "PictureUrl", "Photo", "PhotoUrl",
+                               "תמונה", "קישור_תמונה")  # Hebrew: image, image link
+        
         rows.append({
             "name": _first_text(it, "ItemName", "ItemNm", "ItemDescription", "Description"),
             "barcode": barcode,
@@ -139,7 +182,8 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
             "brand": _first_text(it, "ManufacturerName", "BrandName"),
             "unit": _first_text(it, "UnitQty", "UnitOfMeasure"),
             "quantity": qty,
-            "is_weighted": is_weighted
+            "is_weighted": is_weighted,
+            "image_url": image_url
         })
     
     return rows, store_metadata

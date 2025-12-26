@@ -85,15 +85,23 @@ async def upsert_store(retailer_db_id: int, external_id: str, name: str = None,
     if not pool: return None
     
     display_name = name or f"Store {external_id}"
+    
+    # Log when we're trying to update with address/city data
+    if address or city:
+        logger.info(f"upsert_store retailer_id={retailer_db_id} ext_id={external_id} "
+                   f"name={display_name} city={city} address={address}")
+    
     async with pool.acquire() as conn:
+        # Use COALESCE but allow NULL to overwrite if we explicitly want to clear it
+        # However, we'll prefer non-NULL values: if EXCLUDED has a value, use it; otherwise keep existing
         row = await conn.fetchrow("""
             INSERT INTO stores ("retailerId", "externalId", name, city, address, "createdAt", "updatedAt")
             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
             ON CONFLICT ("retailerId", "externalId") 
             DO UPDATE SET 
-                name = COALESCE(EXCLUDED.name, stores.name),
-                city = COALESCE(EXCLUDED.city, stores.city),
-                address = COALESCE(EXCLUDED.address, stores.address),
+                name = COALESCE(NULLIF(EXCLUDED.name, ''), stores.name),
+                city = COALESCE(NULLIF(EXCLUDED.city, ''), stores.city),
+                address = COALESCE(NULLIF(EXCLUDED.address, ''), stores.address),
                 "updatedAt" = NOW()
             RETURNING id
         """, retailer_db_id, external_id, display_name, city, address)
@@ -101,25 +109,26 @@ async def upsert_store(retailer_db_id: int, external_id: str, name: str = None,
 
 async def upsert_product(barcode: str, name: str = None, brand: str = None, 
                          quantity: float = None, unit: str = None,
-                         is_weighted: bool = False) -> Optional[int]:
+                         is_weighted: bool = False, image_url: str = None) -> Optional[int]:
     pool = await get_pool()
     if not pool: return None
     
     placeholder_name = name or f"Unknown ({barcode})"
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO products (barcode, name, brand, quantity, unit, "isWeighted", "createdAt", "updatedAt")
-            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+            INSERT INTO products (barcode, name, brand, quantity, unit, "isWeighted", "imageUrl", "createdAt", "updatedAt")
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
             ON CONFLICT (barcode) 
             DO UPDATE SET 
-                name = COALESCE(EXCLUDED.name, products.name),
-                brand = COALESCE(EXCLUDED.brand, products.brand),
+                name = COALESCE(NULLIF(EXCLUDED.name, ''), products.name),
+                brand = COALESCE(NULLIF(EXCLUDED.brand, ''), products.brand),
                 quantity = COALESCE(EXCLUDED.quantity, products.quantity),
-                unit = COALESCE(EXCLUDED.unit, products.unit),
+                unit = COALESCE(NULLIF(EXCLUDED.unit, ''), products.unit),
                 "isWeighted" = COALESCE(EXCLUDED."isWeighted", products."isWeighted"),
+                "imageUrl" = COALESCE(NULLIF(EXCLUDED."imageUrl", ''), products."imageUrl"),
                 "updatedAt" = NOW()
             RETURNING id
-        """, barcode, name if name else placeholder_name, brand, quantity, unit, is_weighted)
+        """, barcode, name if name else placeholder_name, brand, quantity, unit, is_weighted, image_url)
         return row['id'] if row else None
 
 async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
@@ -192,7 +201,8 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
             brand=row.get("brand"),
             quantity=row.get("quantity"),
             unit=row.get("unit"),
-            is_weighted=row.get("is_weighted", False)
+            is_weighted=row.get("is_weighted", False),
+            image_url=row.get("image_url")
         )
         
         # 3. Create Snapshot
