@@ -4,10 +4,9 @@ Standalone script to run the crawler.
 Used by GitHub Actions for scheduled crawls.
 
 Usage:
-    python run_crawler.py --type=public --batch=1   # Crawl public retailers, batch 1
-    python run_crawler.py --type=public --batch=2   # Crawl public retailers, batch 2
-    python run_crawler.py --type=auth --batch=1     # Crawl auth retailers, batch 1
-    python run_crawler.py --type=auth --batch=2     # Crawl auth retailers, batch 2
+    python run_crawler.py --retailer=shufersal     # Crawl single retailer
+    python run_crawler.py --type=public             # Crawl all public retailers
+    python run_crawler.py --type=auth               # Crawl all auth retailers
     python run_crawler.py                           # Crawl all retailers (default)
 """
 from __future__ import annotations
@@ -103,7 +102,7 @@ async def get_retailers_for_crawl(crawl_type: Optional[str] = None):
     return filtered_retailers
 
 async def main():
-    """Run crawler for retailers filtered by type and batch"""
+    """Run crawler for retailers filtered by type or single retailer"""
     parser = argparse.ArgumentParser(description="Run price crawler")
     parser.add_argument(
         "--type",
@@ -111,32 +110,44 @@ async def main():
         help="Crawl type: 'public' (no login) or 'auth' (login required)"
     )
     parser.add_argument(
-        "--batch",
-        type=int,
-        choices=[1, 2],
-        help="Batch number (1 or 2) to split retailers into parallel jobs"
+        "--retailer",
+        type=str,
+        help="Crawl a single retailer by slug (e.g., 'shufersal', 'ramilevi')"
     )
     args = parser.parse_args()
     
     try:
-        # Get retailers filtered by type
-        retailers = await get_retailers_for_crawl(args.type)
-        
-        if not retailers:
-            logger.warning(f"No enabled retailers found for type={args.type or 'all'}")
-            sys.exit(0)
-        
-        # Split retailers into batches if --batch is specified
-        if args.batch:
-            # Split into two batches: batch 1 gets even indices (0, 2, 4...), batch 2 gets odd indices (1, 3, 5...)
-            batch_retailers = retailers[args.batch - 1::2]  # batch 1: [0::2], batch 2: [1::2]
-            retailers = batch_retailers
-            logger.info(f"crawler.start type={args.type} batch={args.batch} retailers={len(retailers)} (total={len(retailers) * 2})")
+        # If --retailer is specified, crawl only that retailer
+        if args.retailer:
+            # Sync retailers first
+            await sync_retailers_from_json()
+            
+            # Load retailer config from JSON
+            all_retailers = get_retailers()
+            retailer_config = None
+            for r in all_retailers:
+                if r.get("id") == args.retailer and r.get("enabled", True):
+                    retailer_config = r
+                    break
+            
+            if not retailer_config:
+                logger.error(f"Retailer '{args.retailer}' not found or disabled")
+                sys.exit(1)
+            
+            retailers = [retailer_config]
+            logger.info(f"crawler.start retailer={args.retailer}")
         else:
+            # Get retailers filtered by type
+            retailers = await get_retailers_for_crawl(args.type)
+            
+            if not retailers:
+                logger.warning(f"No enabled retailers found for type={args.type or 'all'}")
+                sys.exit(0)
+            
             logger.info(f"crawler.start type={args.type or 'all'} retailers={len(retailers)}")
         
         if not retailers:
-            logger.warning(f"No retailers in batch {args.batch} for type={args.type}")
+            logger.warning(f"No retailers to crawl")
             sys.exit(0)
         
         # Run crawler

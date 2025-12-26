@@ -144,13 +144,19 @@ async def save_parsed_stores(rows: List[Dict], retailer_id: str) -> int:
             count += 1
     return count
 
-async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: str) -> int:
+async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: str, store_metadata: Dict = None) -> int:
     if not rows: return 0
     db_retailer_id = await upsert_retailer(retailer_id, retailer_name)
     if not db_retailer_id: return 0
     
     saved_count = 0
     store_cache = {}
+    
+    # Extract store metadata from the first row or from store_metadata parameter
+    # store_metadata comes from parse_prices_xml and contains city/address from XML root
+    default_store_name = store_metadata.get("name") if store_metadata else None
+    default_store_city = store_metadata.get("city") if store_metadata else None
+    default_store_address = store_metadata.get("address") if store_metadata else None
 
     for row in rows:
         try:
@@ -162,14 +168,21 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
             try: timestamp = datetime.strptime(row.get("date")[:19], "%Y-%m-%d %H:%M:%S")
             except: pass
 
-        # 1. Upsert Store
+        # 1. Upsert Store with metadata (city, address) if available
         db_store_id = None
-        ext_store_id = row.get("store_id")
+        ext_store_id = row.get("store_id") or (store_metadata.get("store_id") if store_metadata else None)
         if ext_store_id:
             if ext_store_id in store_cache:
                 db_store_id = store_cache[ext_store_id]
             else:
-                db_store_id = await upsert_store(db_retailer_id, ext_store_id)
+                # Use metadata from XML if available, otherwise just use store_id
+                db_store_id = await upsert_store(
+                    db_retailer_id, 
+                    ext_store_id,
+                    name=default_store_name,
+                    city=default_store_city,
+                    address=default_store_address
+                )
                 if db_store_id: store_cache[ext_store_id] = db_store_id
 
         # 2. Upsert Product

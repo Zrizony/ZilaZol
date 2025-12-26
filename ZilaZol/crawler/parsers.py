@@ -1,7 +1,7 @@
 # crawler/parsers.py
 from __future__ import annotations
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple, Dict
 from lxml import etree
 from . import logger
 from .archive_utils import iter_xml_entries, sniff_kind
@@ -43,12 +43,48 @@ def parse_stores_xml(xml_bytes: bytes) -> List[dict]:
     return rows
 
 
-def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> List[dict]:
+def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tuple[List[Dict], Dict]:
+    """
+    Parse price XML and return (price_rows, store_metadata).
+    
+    Returns:
+        tuple: (list of price items, dict with store metadata: {store_id, name, city, address})
+    """
     rows: List[dict] = []
+    store_metadata = {}
+    
     try:
         root = etree.fromstring(xml_bytes)
     except Exception:
-        return rows
+        return rows, store_metadata
+
+    # Extract store metadata from root level (if present in price files)
+    # Some retailers embed store info in price XML files
+    # First try to extract from root level tags
+    store_metadata["store_id"] = store_id or _first_text(root, "StoreId", "StoreID", "storeid")
+    store_metadata["name"] = _first_text(root, "StoreName", "StoreNm", "Name", "StoreName")
+    store_metadata["city"] = _first_text(root, "City", "CityName")
+    store_metadata["address"] = _first_text(root, "Address", "Street", "StoreAddress")
+
+    # Also check for store info in a Store element at root level (takes precedence)
+    store_elem = root.find(".//Store")
+    if store_elem is not None:
+        # Override with Store element values if they exist
+        extracted_store_id = _first_text(store_elem, "StoreId", "StoreID", "storeid")
+        if extracted_store_id:
+            store_metadata["store_id"] = extracted_store_id
+        extracted_name = _first_text(store_elem, "StoreName", "StoreNm", "Name")
+        if extracted_name:
+            store_metadata["name"] = extracted_name
+        extracted_city = _first_text(store_elem, "City", "CityName")
+        if extracted_city:
+            store_metadata["city"] = extracted_city
+        extracted_address = _first_text(store_elem, "Address", "Street", "StoreAddress")
+        if extracted_address:
+            store_metadata["address"] = extracted_address
+
+    # Use store_id from metadata if we found it and it wasn't passed in
+    effective_store_id = store_metadata.get("store_id") or store_id
 
     # 1. Handle PROMOS (Promo/PromoFull)
     # Price is in "DiscountedPrice", IS on sale
@@ -66,7 +102,7 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Li
                     "price": price,
                     "date": date,
                     "company": company,
-                    "store_id": store_id,
+                    "store_id": effective_store_id,
                     "is_on_sale": True,
                     "name": None # Promos often lack names
                 })
@@ -98,14 +134,15 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Li
             "date": _first_text(it, "PriceUpdateDate", "UpdateDate"),
             "price": price,
             "company": company,
-            "store_id": store_id,
+            "store_id": effective_store_id,
             "is_on_sale": False,
             "brand": _first_text(it, "ManufacturerName", "BrandName"),
             "unit": _first_text(it, "UnitQty", "UnitOfMeasure"),
             "quantity": qty,
             "is_weighted": is_weighted
         })
-    return rows
+    
+    return rows, store_metadata
 
 
 async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run_id: str) -> int:
@@ -124,10 +161,10 @@ async def parse_from_blob(data: bytes, filename_hint: str, retailer_id: str, run
                 rows = parse_stores_xml(xml_bytes)
                 if rows: await save_parsed_stores(rows, retailer_id)
             else:
-                rows = parse_prices_xml(xml_bytes, company=retailer_id, store_id=store_ext_id)
+                rows, store_metadata = parse_prices_xml(xml_bytes, company=retailer_id, store_id=store_ext_id)
                 if rows: 
-                    # Use the ID as the name fallback to ensure we save *something*
-                    await save_parsed_prices(rows, retailer_id, retailer_id)
+                    # Pass store metadata to save_parsed_prices so it can update store info
+                    await save_parsed_prices(rows, retailer_id, retailer_id, store_metadata=store_metadata)
         except Exception as e:
             logger.warning(f"Parse error: {e}")
     return count
