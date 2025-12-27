@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ZilaZol Next.js App",
+  title: "Supers Next.js App",
   description: "Next.js + Prisma + PostgreSQL foundation",
 };
 

@@ -1,4 +1,4 @@
-# ZilaZol Next.js Foundation
+# Supers Next.js Foundation
 
 A minimal Next.js application with Prisma ORM and PostgreSQL database connection.
 
@@ -39,7 +39,7 @@ Replace `USER`, `PASSWORD`, `HOST`, and `DATABASE` with your PostgreSQL credenti
 
 **Example:**
 ```bash
-DATABASE_URL="postgres://postgres:password@localhost:5432/zilazol"
+DATABASE_URL="postgres://postgres:password@localhost:5432/supers"
 ```
 
 ### 3. Run Database Migrations
@@ -164,7 +164,7 @@ This foundation is ready for you to build upon. You can:
 3. Extend the Prisma schema with additional models
 4. Add authentication
 5. Build UI components
-6. Integrate with the ZilaZol crawler
+6. Integrate with the Supers crawler
 
 ## Notes
 

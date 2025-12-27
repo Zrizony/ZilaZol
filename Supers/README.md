@@ -1,4 +1,4 @@
-# ZilaZol Price Crawler
+# Supers Price Crawler
 
 ## What it does
 - Crawls Israeli retailers for price data using Playwright automation
@@ -170,7 +170,7 @@ This outputs a table showing downloads, reasons for failures, and errors grouped
 
 Each commit to `main` triggers a Cloud Build that:
 1. Builds Docker image tagged with `$COMMIT_SHA`
-2. Pushes to `gcr.io/$PROJECT_ID/zilazol:$COMMIT_SHA`
+2. Pushes to `gcr.io/$PROJECT_ID/supers:$COMMIT_SHA`
 3. Deploys to Cloud Run with 100% traffic
 4. Sets `RELEASE=$COMMIT_SHA` and `GCS_BUCKET=civic-ripsaw-466109-e2-crawler-data`
 

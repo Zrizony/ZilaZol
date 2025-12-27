@@ -1,7 +1,7 @@
 #!/bin/bash
 # scripts/setup_scheduler.sh
 #
-# Create Cloud Scheduler jobs for ZilaZol price crawler in me-west1 region.
+# Create Cloud Scheduler jobs for Supers price crawler in me-west1 region.
 #
 # This script:
 # - Creates scheduler jobs in me-west1 (same region as Cloud Run)
@@ -122,21 +122,21 @@ echo ""
 
 # Job 1: Public retailers (every 3 hours)
 create_or_update_job \
-  "zilazol-crawler-public" \
+  "supers-crawler-public" \
   "0 */3 * * *" \
   "${SERVICE_URL}/run?group=public" \
   "Crawl public retailers (Bina, generic sites, Wolt) every 3 hours"
 
 # Job 2: Credentialed retailers (every 6 hours)
 create_or_update_job \
-  "zilazol-crawler-creds" \
+  "supers-crawler-creds" \
   "0 */6 * * *" \
   "${SERVICE_URL}/run?group=creds" \
   "Crawl credentialed retailers (PublishedPrices) every 6 hours"
 
 # Job 3: All retailers (daily at 3 AM)
 create_or_update_job \
-  "zilazol-crawler-daily" \
+  "supers-crawler-daily" \
   "0 3 * * *" \
   "${SERVICE_URL}/run" \
   "Crawl all retailers daily at 3 AM Jerusalem time"
@@ -151,15 +151,15 @@ echo "   Service: ${SERVICE_URL}"
 echo "   Service Account: ${SERVICE_ACCOUNT}"
 echo ""
 echo "📅 Created jobs:"
-echo "   - zilazol-crawler-public  → /run?group=public (every 3 hours)"
-echo "   - zilazol-crawler-creds   → /run?group=creds (every 6 hours)"
-echo "   - zilazol-crawler-daily   → /run (daily at 3 AM)"
+echo "   - supers-crawler-public  → /run?group=public (every 3 hours)"
+echo "   - supers-crawler-creds   → /run?group=creds (every 6 hours)"
+echo "   - supers-crawler-daily   → /run (daily at 3 AM)"
 echo ""
 echo "🔧 To view jobs:"
 echo "   gcloud scheduler jobs list --location=${REGION} --project=${PROJECT_ID}"
 echo ""
 echo "🧪 To test a job manually:"
-echo "   gcloud scheduler jobs run zilazol-crawler-public --location=${REGION} --project=${PROJECT_ID}"
+echo "   gcloud scheduler jobs run supers-crawler-public --location=${REGION} --project=${PROJECT_ID}"
 echo ""
 echo "📊 To view logs:"
 echo "   gcloud logging read 'resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE_NAME}' --limit=50 --format=json"

@@ -5,7 +5,7 @@ export default function Navbar() {
     <nav className="navbar">
       <div className="navbar-container">
         <Link href="/" className="navbar-logo">
-          ZilaZol
+          Supers
         </Link>
         <div className="navbar-links">
           <Link href="/">Home</Link>

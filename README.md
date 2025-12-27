@@ -1,4 +1,4 @@
-# ZilaZol
+# Supers
 
 A serverless price crawler for Israeli retailers that automatically collects price data and stores it in a PostgreSQL database.
 
@@ -14,7 +14,7 @@ A serverless price crawler for Israeli retailers that automatically collects pri
 
 ```
 .
-├── ZilaZol/          # Python crawler (main application)
+├── Supers/            # Python crawler (main application)
 │   ├── crawler/      # Core crawling logic
 │   ├── run_crawler.py # Standalone script for GitHub Actions
 │   └── requirements.txt
@@ -51,7 +51,7 @@ A serverless price crawler for Israeli retailers that automatically collects pri
 #### 1. Crawler Setup
 
 ```bash
-cd ZilaZol
+cd Supers
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -99,7 +99,7 @@ npm run dev
 
 ### Retailer Configuration
 
-Retailers are configured in `ZilaZol/data/retailers.json`. Each retailer can have:
+Retailers are configured in `Supers/data/retailers.json`. Each retailer can have:
 - Multiple sources (URLs)
 - Authentication credentials
 - Custom adapters (PublishedPrices, Bina, Generic, Wolt)
@@ -143,7 +143,7 @@ See `NextJS/prisma/schema.prisma` for full schema definition.
 
 ```bash
 # Run crawler locally
-cd ZilaZol
+cd Supers
 python run_crawler.py
 
 # Test Next.js API
