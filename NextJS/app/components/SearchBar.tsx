@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
 
 interface ProductResult {
   productId: number;
@@ -21,6 +22,7 @@ interface ProductResult {
 }
 
 export default function SearchBar() {
+  const { t } = useLanguage();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ProductResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -41,7 +43,7 @@ export default function SearchBar() {
       const data = await response.json();
       setResults(data);
     } catch (err) {
-      setError('Failed to search products. Please try again.');
+      setError(t('search.error'));
       setResults([]);
     } finally {
       setLoading(false);
@@ -55,11 +57,11 @@ export default function SearchBar() {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search for a product by name or barcode..."
+          placeholder={t('search.placeholder')}
           className="search-input"
         />
         <button type="submit" className="search-button" disabled={loading}>
-          {loading ? 'Searching...' : 'Search'}
+          {loading ? t('search.searching') : t('search.button')}
         </button>
       </form>
 
@@ -71,7 +73,7 @@ export default function SearchBar() {
 
       {results.length > 0 && (
         <div className="results-container">
-          <h2 className="results-title">Search Results</h2>
+          <h2 className="results-title">{t('search.results')}</h2>
           {results.map((product) => (
             <div key={product.productId} className="product-card">
               <div className="product-header">
@@ -82,7 +84,6 @@ export default function SearchBar() {
                       alt={product.productName || product.barcode}
                       className="product-image"
                       onError={(e) => {
-                        // Hide image if it fails to load
                         e.currentTarget.style.display = 'none';
                       }}
                     />
@@ -92,7 +93,9 @@ export default function SearchBar() {
                       {product.productName || `Product ${product.barcode}`}
                     </h3>
                     {product.brand && (
-                      <span className="product-brand">Brand: {product.brand}</span>
+                      <span className="product-brand">
+                        {t('product.brand')}: {product.brand}
+                      </span>
                     )}
                     {product.quantity && product.unit && (
                       <span className="product-size">
@@ -107,11 +110,11 @@ export default function SearchBar() {
                 <table className="price-table">
                   <thead>
                     <tr>
-                      <th>Retailer</th>
-                      <th>Store</th>
-                      <th>Price</th>
-                      <th>Status</th>
-                      <th>Updated</th>
+                      <th>{t('product.retailer')}</th>
+                      <th>{t('product.store')}</th>
+                      <th>{t('product.price')}</th>
+                      <th>{t('product.status')}</th>
+                      <th>{t('product.updated')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -119,7 +122,7 @@ export default function SearchBar() {
                       <tr key={idx}>
                         <td className="retailer-cell">{price.retailerName}</td>
                         <td className="store-cell">
-                          {price.storeName || 'N/A'}
+                          {price.storeName || t('product.na')}
                         </td>
                         <td className="price-cell">
                           <span className={price.isOnSale ? 'price-sale' : 'price-normal'}>
@@ -128,9 +131,9 @@ export default function SearchBar() {
                         </td>
                         <td className="status-cell">
                           {price.isOnSale ? (
-                            <span className="badge-sale">On Sale</span>
+                            <span className="badge-sale">{t('product.onSale')}</span>
                           ) : (
-                            <span className="badge-normal">Regular</span>
+                            <span className="badge-normal">{t('product.regular')}</span>
                           )}
                         </td>
                         <td className="timestamp-cell">
@@ -141,7 +144,7 @@ export default function SearchBar() {
                   </tbody>
                 </table>
               ) : (
-                <p className="no-prices">No prices found for this product</p>
+                <p className="no-prices">{t('product.noPrices')}</p>
               )}
             </div>
           ))}
@@ -150,10 +153,9 @@ export default function SearchBar() {
 
       {results.length === 0 && !loading && query && !error && (
         <div className="no-results">
-          No products found. Try searching by product name or barcode.
+          {t('search.noResults')}
         </div>
       )}
     </div>
   );
 }
-

@@ -1,13 +1,18 @@
+'use client';
+
+import { useLanguage } from '../contexts/LanguageContext';
+
 export default function Hero() {
+  const { t } = useLanguage();
+
   return (
     <section className="hero">
       <div className="hero-container">
-        <h1 className="hero-title">Supers</h1>
+        <h1 className="hero-title">{t('hero.title')}</h1>
         <p className="hero-subtitle">
-          Compare prices across retailers and find the best deals on your favorite products
+          {t('hero.subtitle')}
         </p>
       </div>
     </section>
   );
 }
-

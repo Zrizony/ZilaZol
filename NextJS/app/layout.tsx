@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { LanguageProvider } from "./contexts/LanguageContext";
 
 export const metadata: Metadata = {
-  title: "Supers Next.js App",
-  description: "Next.js + Prisma + PostgreSQL foundation",
+  title: "סופרס - השוואת מחירים | Supers - Price Comparison",
+  description: "השווה מחירים בין רשתות ומצא את המבצעים הטובים ביותר | Compare prices across retailers and find the best deals",
 };
 
 export default function RootLayout({
@@ -12,8 +13,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="he" dir="rtl">
+      <body>
+        <LanguageProvider>
+          {children}
+        </LanguageProvider>
+      </body>
     </html>
   );
 }

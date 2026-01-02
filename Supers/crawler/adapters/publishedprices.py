@@ -426,6 +426,8 @@ async def crawl_publishedprices(page: Page, retailer: dict, creds: dict, run_id:
             try:
                 # Download file
                 data, resp, filename = await fetch_url(page, link)
+                if data is None:
+                    continue
                 kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
                 

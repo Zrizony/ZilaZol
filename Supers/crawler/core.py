@@ -70,7 +70,7 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                 if adapter_type == "publishedprices":
                     # Get credentials for publishedprices
                     creds_key = source.get("creds_key") or retailer.get("tenantKey")
-                    if not creds_key or creds_key not in CREDS:
+                    if not creds_key:
                         error_msg = f"no_credentials_mapped for key '{creds_key}'"
                         logger.error(f"credentials.missing retailer={retailer_id} creds_key={creds_key}")
                         result = RetailerResult(
@@ -81,8 +81,33 @@ async def crawl_retailer(retailer: dict, run_id: str) -> List[dict]:
                             reasons=["credentials_missing"]
                         )
                     else:
-                        credentials = CREDS[creds_key]
-                        result = await crawl_publishedprices(page, retailer, credentials, run_id)
+                        # Case-insensitive credential lookup
+                        if creds_key not in CREDS:
+                            # Try case-insensitive match
+                            creds_key_lower = creds_key.lower()
+                            matched_key = None
+                            for key in CREDS.keys():
+                                if key.lower() == creds_key_lower:
+                                    matched_key = key
+                                    break
+                            if matched_key:
+                                creds_key = matched_key
+                                logger.debug(f"credentials.case_match retailer={retailer_id} original={source.get('creds_key') or retailer.get('tenantKey')} matched={creds_key}")
+                            else:
+                                error_msg = f"no_credentials_mapped for key '{creds_key}'"
+                                logger.error(f"credentials.missing retailer={retailer_id} creds_key={creds_key}")
+                                result = RetailerResult(
+                                    retailer_id=retailer_id,
+                                    source_url=source_url,
+                                    errors=[error_msg],
+                                    adapter="publishedprices",
+                                    reasons=["credentials_missing"]
+                                )
+                        
+                        # If we have a valid creds_key (either original or matched), proceed
+                        if creds_key in CREDS:
+                            credentials = CREDS[creds_key]
+                            result = await crawl_publishedprices(page, retailer, credentials, run_id)
                 elif adapter_type == "bina":
                     result = await bina_adapter(page, source, retailer_id, seen_hashes, seen_names, run_id)
                 elif adapter_type == "wolt_dateindex":

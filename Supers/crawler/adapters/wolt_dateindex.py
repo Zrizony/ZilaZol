@@ -134,6 +134,8 @@ async def wolt_dateindex_adapter(
             try:
                 # Download file
                 data, resp, filename = await fetch_url(page, link)
+                if data is None:
+                    continue
                 kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
                 

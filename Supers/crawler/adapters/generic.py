@@ -108,6 +108,8 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
             filename = link.split('/')[-1] or link  # Fallback for error logging
             try:
                 data, resp, filename = await fetch_url(page, link)
+                if data is None:
+                    continue
                 kind = sniff_kind(data)
                 md5_hash = md5_hex(data)
                 

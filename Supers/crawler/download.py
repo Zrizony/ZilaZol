@@ -32,9 +32,12 @@ def pick_filename(resp, fallback: str) -> str:
     return fallback
 
 
-async def fetch_url(page: Page, url: str) -> tuple[bytes, object, str]:
-    """Download URL and return (data, response, filename)."""
+async def fetch_url(page: Page, url: str) -> tuple[bytes | None, object | None, str | None]:
+    """Download URL and return (data, response, filename). Returns (None, None, None) for 404 errors."""
     resp = await page.request.get(url, timeout=90000)
+    if resp.status == 404:
+        logger.warning(f"File missing (404): {url} - skipping")
+        return None, None, None
     if not resp.ok:
         raise RuntimeError(f"download_failed status={resp.status}")
     data = await resp.body()
