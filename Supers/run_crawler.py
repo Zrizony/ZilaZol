@@ -161,8 +161,8 @@ async def main():
         try:
             results = await asyncio.wait_for(run_all(retailers), timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            logger.error(f"crawler.timeout exceeded timeout={args.timeout}min retailers={len(retailers)}")
-            sys.exit(1)
+            logger.warning(f"Timeout reached - stopping run gracefully. Partial data saved. timeout={args.timeout}min retailers={len(retailers)}")
+            sys.exit(0)
         
         # Count successes and errors
         success_count = sum(1 for r in results if not r.get("errors"))

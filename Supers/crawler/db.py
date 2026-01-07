@@ -133,9 +133,34 @@ async def upsert_product(barcode: str, name: str = None, brand: str = None,
 
 async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
                                 is_on_sale: bool, timestamp: datetime, store_id: Optional[int]) -> Optional[int]:
+    """
+    Create a price snapshot with deduplication.
+    Checks if a snapshot with the same (productId, retailerId, storeId, timestamp) already exists.
+    If it exists, updates seenAt and returns existing ID. Otherwise, inserts new record.
+    """
     pool = await get_pool()
     if not pool: return None
     async with pool.acquire() as conn:
+        # Check if snapshot already exists (deduplication)
+        existing = await conn.fetchrow("""
+            SELECT id FROM price_snapshots
+            WHERE "productId" = $1 
+              AND "retailerId" = $2 
+              AND ("storeId" = $3 OR ("storeId" IS NULL AND $3 IS NULL))
+              AND timestamp = $4
+            LIMIT 1
+        """, product_id, retailer_id, store_id, timestamp)
+        
+        if existing:
+            # Update seenAt to reflect we've seen this price again
+            await conn.execute("""
+                UPDATE price_snapshots
+                SET "seenAt" = NOW()
+                WHERE id = $1
+            """, existing['id'])
+            return existing['id']
+        
+        # Insert new snapshot
         row = await conn.fetchrow("""
             INSERT INTO price_snapshots 
                 ("productId", "retailerId", "storeId", price, "isOnSale", timestamp, "seenAt")
@@ -205,10 +230,10 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
             image_url=row.get("image_url")
         )
         
-        # 3. Create Snapshot
+        # 3. Create Snapshot (with deduplication)
         if db_product_id:
             try:
-                await create_price_snapshot(
+                snapshot_id = await create_price_snapshot(
                     product_id=db_product_id,
                     retailer_id=db_retailer_id,
                     price=price,
@@ -216,7 +241,8 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
                     timestamp=timestamp,
                     store_id=db_store_id
                 )
-                saved_count += 1
+                if snapshot_id:
+                    saved_count += 1
             except Exception as e:
                 logger.error(f"Snapshot insert failed: {e}")
 

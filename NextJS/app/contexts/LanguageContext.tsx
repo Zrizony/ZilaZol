@@ -45,6 +45,8 @@ const translations = {
     'product.regular': 'רגיל',
     'product.noPrices': 'לא נמצאו מחירים למוצר זה',
     'product.na': 'לא זמין',
+    'product.bestPrice': 'מחיר מומלץ',
+    'product.priceRange': 'מחירים',
   },
   en: {
     // Navigation
@@ -78,6 +80,8 @@ const translations = {
     'product.regular': 'Regular',
     'product.noPrices': 'No prices found for this product',
     'product.na': 'N/A',
+    'product.bestPrice': 'Best Price',
+    'product.priceRange': 'Prices',
   },
 };
 

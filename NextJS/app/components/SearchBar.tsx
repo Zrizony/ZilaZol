@@ -73,81 +73,106 @@ export default function SearchBar() {
 
       {results.length > 0 && (
         <div className="results-container">
-          <h2 className="results-title">{t('search.results')}</h2>
-          {results.map((product) => (
-            <div key={product.productId} className="product-card">
-              <div className="product-header">
-                <div className="product-info-row">
-                  {product.imageUrl && (
-                    <img 
-                      src={product.imageUrl} 
-                      alt={product.productName || product.barcode}
-                      className="product-image"
-                      onError={(e) => {
-                        e.currentTarget.style.display = 'none';
-                      }}
-                    />
-                  )}
-                  <div className="product-details">
-                    <h3 className="product-name">
+          <div className="results-header">
+            <h2 className="results-title">{t('search.results')}</h2>
+            <div className="results-count">{results.length} {results.length === 1 ? 'product' : 'products'}</div>
+          </div>
+          <div className="products-grid">
+            {results.map((product) => {
+              // Find best price (lowest)
+              const sortedPrices = [...product.prices].sort((a, b) => a.price - b.price);
+              const bestPrice = sortedPrices[0];
+              const hasMultiplePrices = product.prices.length > 1;
+              
+              return (
+                <div key={product.productId} className="product-card-modern">
+                  {/* Product Image */}
+                  <div className="product-image-wrapper">
+                    {product.imageUrl ? (
+                      <img 
+                        src={product.imageUrl} 
+                        alt={product.productName || product.barcode}
+                        className="product-image-modern"
+                        onError={(e) => {
+                          e.currentTarget.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="200"%3E%3Crect fill="%23f0f0f0" width="200" height="200"/%3E%3Ctext fill="%23999" font-family="sans-serif" font-size="14" x="50%25" y="50%25" text-anchor="middle" dominant-baseline="middle"%3ENo Image%3C/text%3E%3C/svg%3E';
+                        }}
+                      />
+                    ) : (
+                      <div className="product-image-placeholder">
+                        <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                          <rect x="3" y="3" width="18" height="18" rx="2" strokeWidth="2"/>
+                          <path d="M9 9h6v6H9z" strokeWidth="2"/>
+                        </svg>
+                      </div>
+                    )}
+                    {bestPrice?.isOnSale && (
+                      <div className="sale-badge">{t('product.onSale')}</div>
+                    )}
+                  </div>
+
+                  {/* Product Info */}
+                  <div className="product-info-modern">
+                    <h3 className="product-name-modern">
                       {product.productName || `Product ${product.barcode}`}
                     </h3>
-                    {product.brand && (
-                      <span className="product-brand">
-                        {t('product.brand')}: {product.brand}
-                      </span>
+                    
+                    <div className="product-meta">
+                      {product.brand && (
+                        <span className="product-brand-modern">{product.brand}</span>
+                      )}
+                      {product.quantity && product.unit && (
+                        <span className="product-size-modern">
+                          {product.quantity} {product.unit}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Best Price Highlight */}
+                    {bestPrice && (
+                      <div className="price-section">
+                        <div className="best-price">
+                          <span className="price-label">{t('product.bestPrice')}</span>
+                          <span className="price-value-best">
+                            ₪{bestPrice.price.toFixed(2)}
+                          </span>
+                          <span className="retailer-name-best">{bestPrice.retailerName}</span>
+                        </div>
+                        
+                        {hasMultiplePrices && (
+                          <div className="price-comparison">
+                            <span className="price-range">
+                              {sortedPrices.length} {t('product.priceRange')} ₪{sortedPrices[sortedPrices.length - 1].price.toFixed(2)} - ₪{bestPrice.price.toFixed(2)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     )}
-                    {product.quantity && product.unit && (
-                      <span className="product-size">
-                        {product.quantity} {product.unit}
-                      </span>
+
+                    {/* All Prices (Collapsible) */}
+                    {product.prices.length > 1 && (
+                      <details className="price-details">
+                        <summary className="price-details-summary">
+                          {t('product.price')} ({product.prices.length})
+                        </summary>
+                        <div className="price-list">
+                          {sortedPrices.map((price, idx) => (
+                            <div key={idx} className={`price-item ${price.price === bestPrice.price ? 'price-item-best' : ''}`}>
+                              <div className="price-item-retailer">{price.retailerName}</div>
+                              <div className="price-item-store">{price.storeName || t('product.na')}</div>
+                              <div className={`price-item-value ${price.isOnSale ? 'price-item-sale' : ''}`}>
+                                ₪{price.price.toFixed(2)}
+                                {price.isOnSale && <span className="sale-indicator">{t('product.onSale')}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
                     )}
                   </div>
                 </div>
-              </div>
-
-              {product.prices.length > 0 ? (
-                <table className="price-table">
-                  <thead>
-                    <tr>
-                      <th>{t('product.retailer')}</th>
-                      <th>{t('product.store')}</th>
-                      <th>{t('product.price')}</th>
-                      <th>{t('product.status')}</th>
-                      <th>{t('product.updated')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {product.prices.map((price, idx) => (
-                      <tr key={idx}>
-                        <td className="retailer-cell">{price.retailerName}</td>
-                        <td className="store-cell">
-                          {price.storeName || t('product.na')}
-                        </td>
-                        <td className="price-cell">
-                          <span className={price.isOnSale ? 'price-sale' : 'price-normal'}>
-                            ₪{price.price.toFixed(2)}
-                          </span>
-                        </td>
-                        <td className="status-cell">
-                          {price.isOnSale ? (
-                            <span className="badge-sale">{t('product.onSale')}</span>
-                          ) : (
-                            <span className="badge-normal">{t('product.regular')}</span>
-                          )}
-                        </td>
-                        <td className="timestamp-cell">
-                          {new Date(price.timestamp).toLocaleDateString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <p className="no-prices">{t('product.noPrices')}</p>
-              )}
-            </div>
-          ))}
+              );
+            })}
+          </div>
         </div>
       )}
 

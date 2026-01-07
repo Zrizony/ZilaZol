@@ -44,3 +44,10 @@ downloads/
 json_out/
 output/
 test/
+victory_images/
+
+# Database maintenance scripts (contain DATABASE_URL references)
+scripts/check_storage.py
+scripts/vacuum_db.py
+scripts/force_cleanup.py
+scripts/check_and_fix_duplicates.py

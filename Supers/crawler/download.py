@@ -33,17 +33,31 @@ def pick_filename(resp, fallback: str) -> str:
 
 
 async def fetch_url(page: Page, url: str) -> tuple[bytes | None, object | None, str | None]:
-    """Download URL and return (data, response, filename). Returns (None, None, None) for 404 errors."""
-    resp = await page.request.get(url, timeout=90000)
-    if resp.status == 404:
-        logger.warning(f"File missing (404): {url} - skipping")
+    """Download URL and return (data, response, filename). Returns (None, None, None) for 404/403 errors."""
+    try:
+        resp = await page.request.get(url, timeout=90000)
+        
+        # Handle 404 (Not Found) and 403 (Forbidden) - skip broken links
+        if resp.status == 404:
+            logger.warning(f"Skipping broken link: {url}")
+            return None, None, None
+        if resp.status == 403:
+            logger.warning(f"Skipping broken link: {url}")
+            return None, None, None
+        
+        # Raise error for other non-OK statuses
+        if not resp.ok:
+            raise RuntimeError(f"download_failed status={resp.status}")
+        
+        data = await resp.body()
+        fallback = urlparse(url).path.split('/')[-1] or "download"
+        fname = pick_filename(resp, fallback)
+        return data, resp, fname
+    
+    except Exception as e:
+        # Catch any network/request errors and log them
+        logger.warning(f"Skipping broken link: {url} (error: {e})")
         return None, None, None
-    if not resp.ok:
-        raise RuntimeError(f"download_failed status={resp.status}")
-    data = await resp.body()
-    fallback = urlparse(url).path.split('/')[-1] or "download"
-    fname = pick_filename(resp, fallback)
-    return data, resp, fname
 
 
 async def maybe_parse_to_jsonl(retailer_id: str, filename: str, data: bytes, run_id: str = ""):
