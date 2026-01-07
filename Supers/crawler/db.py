@@ -134,14 +134,17 @@ async def upsert_product(barcode: str, name: str = None, brand: str = None,
 async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
                                 is_on_sale: bool, timestamp: datetime, store_id: Optional[int]) -> Optional[int]:
     """
-    Create a price snapshot with deduplication.
-    Checks if a snapshot with the same (productId, retailerId, storeId, timestamp) already exists.
-    If it exists, updates seenAt and returns existing ID. Otherwise, inserts new record.
+    Create a price snapshot with deduplication and debounce logic.
+    
+    Deduplication checks:
+    1. Exact match on (productId, retailerId, storeId, timestamp) - prevents exact duplicates
+    2. Debounce check: If the LATEST snapshot has the EXACT same price and is_on_sale status,
+       skip insertion to prevent spam (multiple inserts per second with identical data)
     """
     pool = await get_pool()
     if not pool: return None
     async with pool.acquire() as conn:
-        # Check if snapshot already exists (deduplication)
+        # Check if snapshot already exists (exact timestamp match)
         existing = await conn.fetchrow("""
             SELECT id FROM price_snapshots
             WHERE "productId" = $1 
@@ -160,7 +163,32 @@ async def create_price_snapshot(product_id: int, retailer_id: int, price: float,
             """, existing['id'])
             return existing['id']
         
-        # Insert new snapshot
+        # DEBOUNCE CHECK: Check if latest snapshot has same price and sale status
+        # This prevents spam: if price hasn't changed, don't insert duplicate
+        latest = await conn.fetchrow("""
+            SELECT id, price, "isOnSale" FROM price_snapshots
+            WHERE "productId" = $1 
+              AND "retailerId" = $2 
+              AND ("storeId" = $3 OR ("storeId" IS NULL AND $3 IS NULL))
+            ORDER BY timestamp DESC, "seenAt" DESC
+            LIMIT 1
+        """, product_id, retailer_id, store_id)
+        
+        if latest:
+            latest_price = float(latest['price'])
+            latest_is_on_sale = bool(latest['isOnSale'])
+            
+            # If price and sale status are identical, skip insertion (debounce)
+            if abs(latest_price - price) < 0.01 and latest_is_on_sale == is_on_sale:
+                # Update seenAt on the existing record instead of creating duplicate
+                await conn.execute("""
+                    UPDATE price_snapshots
+                    SET "seenAt" = NOW()
+                    WHERE id = $1
+                """, latest['id'])
+                return latest['id']
+        
+        # Insert new snapshot (price changed or first snapshot)
         row = await conn.fetchrow("""
             INSERT INTO price_snapshots 
                 ("productId", "retailerId", "storeId", price, "isOnSale", timestamp, "seenAt")
@@ -218,6 +246,14 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
                     address=default_store_address
                 )
                 if db_store_id: store_cache[ext_store_id] = db_store_id
+
+        # PRICE NORMALIZATION: Convert Agoras to Shekels for storeId 89
+        # Store 89 saves prices in Agoras (×100) instead of Shekels
+        # Detect and normalize: if price > 1000 and storeId is 89, divide by 100
+        if db_store_id == 89 and price > 1000:
+            original_price = price
+            price = price / 100.0
+            logger.debug(f"price.normalized store_id=89 original={original_price} normalized={price}")
 
         # 2. Upsert Product
         db_product_id = await upsert_product(

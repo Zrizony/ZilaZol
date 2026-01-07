@@ -146,15 +146,50 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
                 })
 
     # 2. Handle PRICES (Price/PriceFull)
-    # Price is in "ItemPrice", NOT on sale
+    # Some retailers have both regular price and promotion price in the same Item element
+    # We need to compare them to determine if item is actually on sale
     items = root.findall(".//Item")
     if not items: items = list(root)
     
     for it in items:
         barcode = _first_text(it, "ItemCode", "Barcode")
-        price = _first_text(it, "ItemPrice", "Price")
+        regular_price_str = _first_text(it, "ItemPrice", "Price", "RegularPrice", "ListPrice")
+        promotion_price_str = _first_text(it, "PromotionPrice", "DiscountedPrice", "SalePrice", "DiscountPrice")
         
-        if not (barcode and price): continue
+        # Determine which price to use and if on sale
+        price_str = None
+        is_on_sale = False
+        
+        if promotion_price_str and regular_price_str:
+            # Both prices exist - compare them
+            try:
+                regular_price = float(regular_price_str)
+                promotion_price = float(promotion_price_str)
+                # Only mark as sale if promotion price is actually lower
+                if promotion_price < regular_price:
+                    price_str = promotion_price_str
+                    is_on_sale = True
+                else:
+                    # Promotion price >= regular price, use regular price (not a real sale)
+                    price_str = regular_price_str
+                    is_on_sale = False
+            except (ValueError, TypeError):
+                # If parsing fails, fall back to regular price
+                price_str = regular_price_str
+                is_on_sale = False
+        elif promotion_price_str:
+            # Only promotion price exists - use it but mark as sale
+            price_str = promotion_price_str
+            is_on_sale = True
+        elif regular_price_str:
+            # Only regular price exists
+            price_str = regular_price_str
+            is_on_sale = False
+        else:
+            # No price found, skip this item
+            continue
+        
+        if not (barcode and price_str): continue
 
         # Extract Raw Metadata
         qty_str = _first_text(it, "Quantity", "Content", "QtyInPackage")
@@ -175,10 +210,10 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
             "name": _first_text(it, "ItemName", "ItemNm", "ItemDescription", "Description"),
             "barcode": barcode,
             "date": _first_text(it, "PriceUpdateDate", "UpdateDate"),
-            "price": price,
+            "price": price_str,
             "company": company,
             "store_id": effective_store_id,
-            "is_on_sale": False,
+            "is_on_sale": is_on_sale,
             "brand": _first_text(it, "ManufacturerName", "BrandName"),
             "unit": _first_text(it, "UnitQty", "UnitOfMeasure"),
             "quantity": qty,

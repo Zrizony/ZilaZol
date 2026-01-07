@@ -79,10 +79,41 @@ export default function SearchBar() {
           </div>
           <div className="products-grid">
             {results.map((product) => {
-              // Find best price (lowest)
-              const sortedPrices = [...product.prices].sort((a, b) => a.price - b.price);
-              const bestPrice = sortedPrices[0];
-              const hasMultiplePrices = product.prices.length > 1;
+              // Filter out invalid sale prices (sale prices should never be higher than regular prices)
+              // Also filter out suspiciously high prices (> 1000) marked as sale, unless there are no regular prices
+              const regularPrices = product.prices.filter(p => !p.isOnSale);
+              const salePrices = product.prices.filter(p => p.isOnSale);
+              const maxRegularPrice = regularPrices.length > 0 
+                ? Math.max(...regularPrices.map(p => p.price))
+                : Infinity;
+              
+              // Filter sale prices:
+              // 1. Exclude if higher than regular prices (sale should be lower)
+              // 2. Exclude if suspiciously high (> 1000) AND there are regular prices to compare against
+              //    (if only sale prices exist, allow them even if > 1000, as they might be legitimate)
+              const validSalePrices = salePrices.filter(p => {
+                if (p.price > maxRegularPrice) return false; // Sale price higher than regular = invalid
+                if (regularPrices.length > 0 && p.price > 1000) return false; // Suspiciously high when we have regular prices
+                return true;
+              });
+              
+              // Combine valid prices and sort
+              const validPrices = [...regularPrices, ...validSalePrices];
+              const sortedPrices = [...validPrices].sort((a, b) => {
+                // If prices are equal, prefer sale prices (they're better deals)
+                if (a.price === b.price) {
+                  return a.isOnSale ? -1 : 1;
+                }
+                return a.price - b.price;
+              });
+              
+              const bestPrice = sortedPrices.length > 0 ? sortedPrices[0] : null;
+              const hasMultiplePrices = validPrices.length > 1;
+              
+              // Skip products with no valid prices
+              if (!bestPrice) {
+                return null;
+              }
               
               return (
                 <div key={product.productId} className="product-card-modern">
@@ -149,10 +180,10 @@ export default function SearchBar() {
                     )}
 
                     {/* All Prices (Collapsible) */}
-                    {product.prices.length > 1 && (
+                    {validPrices.length > 1 && (
                       <details className="price-details">
                         <summary className="price-details-summary">
-                          {t('product.price')} ({product.prices.length})
+                          {t('product.price')} ({validPrices.length})
                         </summary>
                         <div className="price-list">
                           {sortedPrices.map((price, idx) => (
