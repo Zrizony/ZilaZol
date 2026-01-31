@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 """
-Victory Online Image Scraper
+Victory Online Image Downloader
 
-This script reverse-engineers the Victory Online API to download product images
-in bulk by requesting 5000 items at once instead of paginating.
-
-Images are uploaded to Supabase Storage instead of saving locally.
+Downloads product images from Victory Online website and saves them with product names as filenames.
 
 Usage:
-    python scripts/victory_scraper.py
+    python scripts/victory_scraper.py [--output-dir DIR] [--category-url URL]
 
 Requirements:
+    - playwright library (pip install playwright)
     - requests library (pip install requests)
-    - supabase library (pip install supabase)
-    
-Environment Variables:
-    - SUPABASE_URL: Your Supabase project URL
-    - SUPABASE_KEY: Your Supabase service role key (or anon key with storage permissions)
-    - SUPABASE_STORAGE_BUCKET: Storage bucket name (default: "product-images")
 """
 
-import requests
-import json
-import os
-import time
+import asyncio
+import re
 import sys
 from pathlib import Path
+from playwright.async_api import async_playwright
+import requests
 
 # Fix Windows console encoding issues
 if sys.platform == 'win32':
@@ -33,224 +25,342 @@ if sys.platform == 'win32':
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
-# Add parent directory to path for imports if needed
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Try to import Supabase client
-try:
-    from supabase import create_client, Client
-except ImportError:
-    print("ERROR: supabase library is not installed.")
-    print("Please install it with: pip install supabase")
-    sys.exit(1)
+def sanitize_filename(name: str) -> str:
+    """Sanitize product name for use as filename"""
+    # Remove or replace invalid filename characters
+    name = re.sub(r'[<>:"/\\|?*]', '_', name)
+    # Remove leading/trailing spaces and dots
+    name = name.strip(' .')
+    # Limit length
+    if len(name) > 200:
+        name = name[:200]
+    # Remove multiple consecutive underscores
+    name = re.sub(r'_+', '_', name)
+    return name or "product"
 
-# 1. SETUP: Supabase Storage Configuration
-def get_env_var(var_name: str, default: str = None) -> str:
-    """Get environment variable from command line, environment, or .env file"""
-    # First check environment variables
-    value = os.getenv(var_name)
-    if value:
-        return value
+
+async def discover_categories() -> list:
+    """Discover all category URLs from Victory website"""
+    print("🔍 Discovering categories from Victory website...")
+    category_urls = []
     
-    # Try loading from .env file
-    env_files = [
-        Path(__file__).parent.parent.parent / "NextJS" / ".env",
-        Path(__file__).parent.parent / ".env",
-        Path(__file__).parent.parent.parent / ".env",
-    ]
-    
-    for env_file in env_files:
-        if env_file.exists():
-            try:
-                with open(env_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith(f'{var_name}='):
-                            value = line.split('=', 1)[1].strip()
-                            # Remove quotes if present
-                            if value.startswith('"') and value.endswith('"'):
-                                value = value[1:-1]
-                            elif value.startswith("'") and value.endswith("'"):
-                                value = value[1:-1]
-                            return value
-            except Exception:
-                pass
-    
-    return default
-
-SUPABASE_URL = get_env_var("SUPABASE_URL")
-SUPABASE_KEY = get_env_var("SUPABASE_KEY")
-SUPABASE_STORAGE_BUCKET = get_env_var("SUPABASE_STORAGE_BUCKET", "product-images")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print("ERROR: SUPABASE_URL and SUPABASE_KEY must be set.")
-    print("\nYou can set them in one of these ways:")
-    print("1. Environment variables:")
-    print("   export SUPABASE_URL='https://your-project.supabase.co'")
-    print("   export SUPABASE_KEY='your-service-role-key'")
-    print("\n2. Or add them to a .env file in one of these locations:")
-    print("   - NextJS/.env")
-    print("   - Supers/.env")
-    print("   - .env (root directory)")
-    print("\nExample .env file content:")
-    print("   SUPABASE_URL=https://your-project.supabase.co")
-    print("   SUPABASE_KEY=your-service-role-key")
-    print("   SUPABASE_STORAGE_BUCKET=product-images")
-    sys.exit(1)
-
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# 2. THE HACKED REQUEST
-# We changed 'size' to 5000 to get thousands of items in one request.
-# URL without category path to get ALL products from the store
-url = "https://www.victoryonline.co.il/v2/retailers/1470/branches/2440/products"
-
-params = {
-    "appId": "4",
-    # This complex filter basically says "Show me items that are IN STOCK"
-    "filters": '{"bool":{"should":[{"bool":{"must_not":{"exists":{"field":"branch.outOfStockShowUntilDate"}}}},{"bool":{"must":[{"range":{"branch.outOfStockShowUntilDate":{"gt":"now"}}},{"term":{"branch.isOutOfStock":true}}]}},{"bool":{"must":[{"term":{"branch.isOutOfStock":false}}]}}]}}',
-    "from": "0",
-    "languageId": "1",
-    "minScore": "0",
-    "size": "1000"  # Maximum allowed seems to be around 1000, so we'll paginate
-}
-
-headers = {
-    "accept": "application/json, text/plain, */*",
-    "accept-language": "en-US,en;q=0.9",
-    "priority": "u=1, i",
-    "referer": "https://www.victoryonline.co.il/",
-    "sec-ch-ua": '"Brave";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "sec-gpc": "1",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-    "pathname": "/"
-}
-
-cookies = {
-    "retailerId": "1470"
-}
-
-print("🚀 Fetching products from Victory Online...")
-all_products = []
-page_size = 100  # API seems to have a lower limit without category
-from_offset = 0
-
-# Paginate through all products
-while True:
-    params["from"] = str(from_offset)
-    params["size"] = str(page_size)
-    
-    try:
-        print(f"   📥 Fetching products {from_offset} to {from_offset + page_size}...")
-        response = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=30)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"❌ API Request Failed: {e}")
-        if 'response' in locals():
-            print(response.text[:500])
-        break
-    
-    data = response.json()
-    
-    # Response structure uses "products" instead of "data" for the all-products endpoint
-    products = data.get("products", data.get("data", []))
-    
-    # Debug info on first request
-    if from_offset == 0:
-        total = data.get("total", len(products))
-        print(f"   📊 Total products available: {total}")
-    
-    if not products:
-        break
-    
-    all_products.extend(products)
-    print(f"   ✅ Received {len(products)} products (Total: {len(all_products)})")
-    
-    # If we got fewer than page_size, we've reached the end
-    if len(products) < page_size:
-        break
-    
-    from_offset += page_size
-    time.sleep(0.5)  # Be polite with rate limiting
-
-print(f"\n✅ Success! Received {len(all_products)} total products.")
-products = all_products
-
-# 3. DOWNLOAD LOOP
-count = 0
-skipped = 0
-failed = 0
-
-for p in products:
-    name = p.get("name", "Unknown")
-    # Use Barcode as filename (Crucial for linking data later)
-    barcode = p.get("mainBarcode", "") or str(p.get("id"))
-    
-    if not barcode:
-        skipped += 1
-        continue
-    
-    # Extract Image URL (Victory hides it in 'medias')
-    image_url = None
-    if p.get("medias") and len(p["medias"]) > 0:
-        image_url = p["medias"][0].get("url")
-        
-        # Fix relative URLs
-        if image_url and not image_url.startswith("http"):
-            image_url = "https://www.victoryonline.co.il" + image_url
-            
-    if not image_url:
-        skipped += 1
-        continue
-
-    # Upload Image to Supabase Storage
-    storage_path = f"victory/{barcode}.jpg"
-    
-    # Check if file already exists in Supabase Storage
-    try:
-        existing_files = supabase.storage.from_(SUPABASE_STORAGE_BUCKET).list("victory")
-        if existing_files and any(f.get("name") == f"{barcode}.jpg" for f in existing_files):
-            skipped += 1
-            continue
-    except Exception:
-        # If check fails, continue anyway (might be permission issue or file doesn't exist)
-        pass
-
-    try:
-        # Download image from Victory
-        img_response = requests.get(image_url, timeout=10)
-        img_response.raise_for_status()
-        img_data = img_response.content
-        
-        # Upload to Supabase Storage (upsert will overwrite if exists)
-        supabase.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
-            path=storage_path,
-            file=img_data,
-            file_options={"content-type": "image/jpeg", "upsert": True}
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
+            locale="he-IL",
+            viewport={"width": 1920, "height": 1080}
         )
+        page = await context.new_page()
         
-        print(f"📸 Uploaded: {name} -> {storage_path}")
-        count += 1
-        
-        # Rate limit slightly to be polite
-        if count % 100 == 0:
-            print(f"   ⏸️  Pausing... ({count} uploaded so far)")
-            time.sleep(1)
+        try:
+            await page.goto("https://www.victoryonline.co.il/", wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(3000)
             
-    except Exception as e:
-        print(f"⚠️  Failed to upload {name} ({barcode}): {e}")
-        failed += 1
+            # Extract category links
+            category_links = await page.evaluate("""
+                () => {
+                    const categories = new Set();
+                    const links = document.querySelectorAll('a[href*="/categories/"]');
+                    links.forEach(link => {
+                        const href = link.href || link.getAttribute('href');
+                        if (href) {
+                            const match = href.match(/\\/categories\\/(\\d+)(?:\\/products)?/);
+                            if (match) {
+                                const categoryId = match[1];
+                                categories.add(`https://www.victoryonline.co.il/categories/${categoryId}/products`);
+                            }
+                        }
+                    });
+                    return Array.from(categories);
+                }
+            """)
+            
+            category_urls.extend(category_links)
+            print(f"   ✅ Found {len(category_urls)} categories")
+            
+        except Exception as e:
+            print(f"   ⚠️  Error discovering categories: {e}")
+        finally:
+            await browser.close()
+    
+    # Add known categories as fallback
+    if len(category_urls) < 10:
+        known_categories = [
+            "79706", "79707", "79708", "79709", "79710",
+            "79711", "79712", "79713", "79714", "79715",
+            "79716", "79717", "79718", "79719"
+        ]
+        for cat_id in known_categories:
+            cat_url = f"https://www.victoryonline.co.il/categories/{cat_id}/products"
+            if cat_url not in category_urls:
+                category_urls.append(cat_url)
+        print(f"   📋 Added {len(known_categories)} known categories")
+    
+    return list(set(category_urls))
 
-print(f"\n🎉 Done!")
-print(f"   ✅ Uploaded: {count} new images to Supabase Storage")
-print(f"   ⏭️  Skipped: {skipped} (already exist or no image)")
-print(f"   ❌ Failed: {failed}")
-print(f"   📦 Storage bucket: {SUPABASE_STORAGE_BUCKET}")
-print(f"   📁 Storage path: victory/")
 
+async def download_images_from_category(category_url: str, output_dir: Path, downloaded_urls: set) -> int:
+    """Download images from a single category page"""
+    count = 0
+    
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
+            locale="he-IL",
+            viewport={"width": 1920, "height": 1080}
+        )
+        page = await context.new_page()
+        
+        try:
+            await page.goto(category_url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3000)
+            
+            # Extract product images and names from DOM
+            product_images = await page.evaluate("""
+                () => {
+                    const products = [];
+                    const productContainers = document.querySelectorAll(
+                        '[class*="product"], [data-product-id], [class*="Product"], [class*="item"]'
+                    );
+                    
+                    productContainers.forEach(container => {
+                        // Extract product name
+                        const nameSelectors = [
+                            '.product-name', '.name', 'h3', 'h4', '[class*="name"]',
+                            '[data-product-name]', '[class*="Name"]', '[class*="title"]'
+                        ];
+                        
+                        let productName = '';
+                        for (const selector of nameSelectors) {
+                            const nameEl = container.querySelector(selector);
+                            if (nameEl) {
+                                productName = nameEl.textContent?.trim() || 
+                                             nameEl.getAttribute('data-product-name') || 
+                                             nameEl.getAttribute('title') || '';
+                                if (productName && productName.length > 2) break;
+                            }
+                        }
+                        
+                        // Fallback: get first meaningful text line
+                        if (!productName || productName.length < 3) {
+                            const containerText = container.textContent?.trim() || '';
+                            const lines = containerText.split('\\n').map(l => l.trim()).filter(l => l.length > 2);
+                            if (lines.length > 0 && lines[0].length < 100) {
+                                productName = lines[0];
+                            }
+                        }
+                        
+                        // Find images in container
+                        const images = container.querySelectorAll('img[src*="cloudfront"]');
+                        images.forEach(img => {
+                            const src = img.src || img.getAttribute('data-src') || 
+                                       img.getAttribute('data-lazy-src') || 
+                                       img.getAttribute('srcset')?.split(',')[0]?.trim().split(' ')[0];
+                            
+                            if (src && src.includes('cloudfront')) {
+                                // Skip UI elements
+                                const srcLower = src.toLowerCase();
+                                if (srcLower.includes('icon') || srcLower.includes('logo') || 
+                                    srcLower.includes('loading') || srcLower.includes('arrow') ||
+                                    srcLower.includes('trash') || srcLower.includes('cart')) {
+                                    return;
+                                }
+                                
+                                products.push({
+                                    imageUrl: src,
+                                    productName: productName || ''
+                                });
+                            }
+                        });
+                    });
+                    
+                    return products;
+                }
+            """)
+            
+            # Scroll to load more products
+            print(f"      📜 Scrolling to load all products...")
+            previous_count = len(product_images)
+            no_new_count = 0
+            
+            for _ in range(20):  # Max 20 scrolls
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(2000)
+                
+                # Re-extract after scroll
+                more_products = await page.evaluate("""
+                    () => {
+                        const products = [];
+                        const containers = document.querySelectorAll(
+                            '[class*="product"], [data-product-id], [class*="Product"], [class*="item"]'
+                        );
+                        
+                        containers.forEach(container => {
+                            const nameSelectors = ['.product-name', '.name', 'h3', 'h4', '[class*="name"]'];
+                            let productName = '';
+                            for (const selector of nameSelectors) {
+                                const nameEl = container.querySelector(selector);
+                                if (nameEl) {
+                                    productName = nameEl.textContent?.trim() || '';
+                                    if (productName && productName.length > 2) break;
+                                }
+                            }
+                            
+                            const images = container.querySelectorAll('img[src*="cloudfront"]');
+                            images.forEach(img => {
+                                const src = img.src || img.getAttribute('data-src');
+                                if (src && src.includes('cloudfront')) {
+                                    const srcLower = src.toLowerCase();
+                                    if (!srcLower.includes('icon') && !srcLower.includes('logo') &&
+                                        !srcLower.includes('loading') && !srcLower.includes('arrow')) {
+                                        products.push({
+                                            imageUrl: src,
+                                            productName: productName || ''
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                        return products;
+                    }
+                """)
+                
+                # Merge unique products
+                seen_urls = {p['imageUrl'] for p in product_images}
+                for p in more_products:
+                    if p['imageUrl'] not in seen_urls:
+                        product_images.append(p)
+                        seen_urls.add(p['imageUrl'])
+                
+                current_count = len(product_images)
+                if current_count > previous_count:
+                    print(f"         📦 Found {current_count} products so far...")
+                    previous_count = current_count
+                    no_new_count = 0
+                else:
+                    no_new_count += 1
+                    if no_new_count >= 3:
+                        break
+            
+            # Download images
+            print(f"      📥 Downloading {len(product_images)} images...")
+            for product in product_images:
+                image_url = product['imageUrl']
+                product_name = product['productName']
+                
+                if image_url in downloaded_urls:
+                    continue
+                
+                # Skip if no product name
+                if not product_name or len(product_name) < 3:
+                    # Try to extract from URL as fallback
+                    url_parts = image_url.split('/')
+                    for part in reversed(url_parts):
+                        if part and len(part) > 8 and any(c.isdigit() for c in part):
+                            product_name = part.split('?')[0].split('.')[0]
+                            break
+                    if not product_name or len(product_name) < 3:
+                        product_name = f"product_{image_url.split('/')[-1].split('?')[0].split('.')[0]}"
+                
+                # Create filename
+                filename = sanitize_filename(product_name) + ".jpg"
+                
+                # Handle duplicates
+                counter = 1
+                original_filename = filename
+                while (output_dir / filename).exists():
+                    filename = f"{sanitize_filename(product_name)}_{counter}.jpg"
+                    counter += 1
+                    if counter > 1000:
+                        filename = original_filename.replace('.jpg', f'_{image_url.split("/")[-1][:10]}.jpg')
+                        break
+                
+                local_path = output_dir / filename
+                
+                try:
+                    # Download image
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://www.victoryonline.co.il/",
+                        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                    }
+                    response = requests.get(image_url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    
+                    # Verify it's an image
+                    if len(response.content) < 2000:  # Too small, probably not a product image
+                        continue
+                    
+                    # Save file
+                    with open(local_path, 'wb') as f:
+                        f.write(response.content)
+                    
+                    downloaded_urls.add(image_url)
+                    count += 1
+                    print(f"         📸 {product_name[:50]} -> {filename}")
+                    
+                except Exception as e:
+                    print(f"         ⚠️  Failed to download {product_name[:30]}: {e}")
+            
+        except Exception as e:
+            print(f"      ⚠️  Error processing category: {e}")
+        finally:
+            await browser.close()
+    
+    return count
+
+
+async def main():
+    """Main function"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Download Victory Online product images")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for images (default: victory_images/)"
+    )
+    parser.add_argument(
+        "--category-url",
+        type=str,
+        default=None,
+        help="Download from specific category URL (skips discovery)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path(__file__).parent.parent / "victory_images"
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Output directory: {output_dir}")
+    
+    # Get category URLs
+    if args.category_url:
+        category_urls = [args.category_url]
+        print(f"📂 Using provided category URL: {args.category_url}")
+    else:
+        category_urls = await discover_categories()
+        print(f"📂 Found {len(category_urls)} categories to process")
+    
+    # Download images from each category
+    downloaded_urls = set()
+    total_downloaded = 0
+    
+    for idx, category_url in enumerate(category_urls, 1):
+        print(f"\n📂 Category {idx}/{len(category_urls)}: {category_url}")
+        count = await download_images_from_category(category_url, output_dir, downloaded_urls)
+        total_downloaded += count
+    
+    print(f"\n🎉 Download complete!")
+    print(f"   ✅ Downloaded: {total_downloaded} images")
+    print(f"   📁 Output directory: {output_dir}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

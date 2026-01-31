@@ -169,8 +169,17 @@ async def bina_collect_download_buttons(page: Page, frame: Frame, filter_today: 
         logger.info("bina.download_buttons found=%d filtered_today=%s today=%s", 
                    len(buttons_found), filter_today, today_str)
         
+        # Diagnostic: Log total buttons found before filtering if we're filtering
+        if filter_today and len(buttons_found) == 0:
+            # Count total buttons without date filter for debugging
+            total_buttons = len(button_data or [])
+            logger.debug("bina.diagnostic retailer=%s total_buttons_in_table=%d filtered_to_today=%d today=%s", 
+                       "unknown", total_buttons, len(buttons_found), today_str)
+        
     except Exception as e:
-        logger.debug("bina.button_extract_error error=%s", str(e))
+        logger.warning("bina.button_extract_error error=%s", str(e))
+        import traceback
+        logger.debug("bina.button_extract_traceback %s", traceback.format_exc())
     
     return buttons_found
 
@@ -252,6 +261,14 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
         logger.info("bina.download_buttons retailer=%s count=%d (today only)", retailer_id, len(pseudo_links))
         return pseudo_links
     
+    # If no buttons found for today, try without date filter (might be no files for today)
+    logger.debug("bina.no_buttons_today retailer=%s trying_without_date_filter", retailer_id)
+    download_buttons_no_filter = await bina_collect_download_buttons(page, frame, filter_today=False)
+    if download_buttons_no_filter:
+        pseudo_links = [f"download_button:{btn['filename']}" for btn in download_buttons_no_filter]
+        logger.info("bina.download_buttons retailer=%s count=%d (no_date_filter)", retailer_id, len(pseudo_links))
+        return pseudo_links
+    
     # Strategy 2: Try to click tabs/filters to reveal download buttons
     tab_clicked = False
     for candidate in ["מחיר מלא", "Price Full", "PriceFull", "מחירון", "Prices"]:
@@ -262,8 +279,8 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
                 tab_clicked = True
                 await page.wait_for_timeout(2000)  # Wait for table to update
                 
-                # Check again for download buttons after tab click
-                download_buttons = await bina_collect_download_buttons(page, frame)
+                # Check again for download buttons after tab click (try without date filter)
+                download_buttons = await bina_collect_download_buttons(page, frame, filter_today=False)
                 if download_buttons:
                     pseudo_links = [f"download_button:{btn['filename']}" for btn in download_buttons]
                     logger.info("bina.download_buttons_after_tab retailer=%s count=%d", retailer_id, len(pseudo_links))
@@ -308,13 +325,34 @@ async def bina_collect_links(page: Page, retailer_id: str = "unknown") -> List[s
         return list(captured)
     
     # No links found - log diagnostic info
-    logger.warning(
-        "bina.no_links retailer=%s url=%s frames=%d tab_clicked=%s", 
-        retailer_id,
-        page.url,
-        len(page.frames),
-        tab_clicked
-    )
+    # Try to get more diagnostic info about what's on the page
+    try:
+        # Check if there are any buttons at all
+        button_count = await frame.locator("button[onclick*='Download'], button[onclick*='download']").count()
+        table_count = await frame.locator("table, tbody").count()
+        
+        # Try to get page HTML snippet for debugging
+        page_title = await page.title()
+        
+        logger.warning(
+            "bina.no_links retailer=%s url=%s frames=%d tab_clicked=%s buttons=%d tables=%d title=%s", 
+            retailer_id,
+            page.url,
+            len(page.frames),
+            tab_clicked,
+            button_count,
+            table_count,
+            page_title[:100] if page_title else "N/A"
+        )
+    except Exception as e:
+        logger.warning(
+            "bina.no_links retailer=%s url=%s frames=%d tab_clicked=%s diagnostic_error=%s", 
+            retailer_id,
+            page.url,
+            len(page.frames),
+            tab_clicked,
+            str(e)
+        )
     
     # Take screenshot for debugging
     with contextlib.suppress(Exception):
@@ -573,10 +611,27 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
     
     try:
         # Navigate to page with proper wait conditions
-        await page.goto(source.get("url", ""), wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        # Additional wait for dynamic content
-        await page.wait_for_timeout(2000)
+        source_url = source.get("url", "")
+        try:
+            await page.goto(source_url, wait_until="domcontentloaded", timeout=60000)
+            # Log redirects for debugging
+            final_url = page.url
+            if final_url != source_url:
+                logger.info("bina.redirect retailer=%s from=%s to=%s", retailer_id, source_url, final_url)
+            
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            # Additional wait for dynamic content
+            await page.wait_for_timeout(2000)
+        except Exception as nav_error:
+            error_msg = str(nav_error)
+            # Check for timeout/connection errors
+            if "timeout" in error_msg.lower() or "net::err_connection" in error_msg.lower() or "navigation timeout" in error_msg.lower():
+                result.errors.append(f"connection_timeout:{source_url}")
+                logger.error("bina.connection_timeout retailer=%s url=%s error=%s", retailer_id, source_url, error_msg)
+                return result
+            else:
+                # Re-raise other navigation errors
+                raise
         
         # Collect download links - use Bina-specific collection FIRST (handles frames properly)
         log_memory(logger, f"bina.before_collect_links retailer={retailer_id}")
@@ -628,13 +683,25 @@ async def bina_adapter(page: Page, source: dict, retailer_id: str, seen_hashes: 
             got = 0
             
             # Try tabs in order; stop if we get downloads
+            # First try with today filter, then without if no results
             for tab in ["PriceFull", "Promo", "Stores"]:
                 await bina_open_tab(frame, tab)
                 await page.wait_for_timeout(2000)  # Wait for table to update
+                
+                # Try with today filter first
                 tab_downloads = await bina_fallback_click_downloads(
                     page, frame, retailer_id, seen_hashes, seen_names, run_id, result, 
                     max_files=0, throttle_ms=200, filter_today=True  # max_files=0 means no limit
                 )
+                
+                # If no downloads with today filter, try without date filter
+                if tab_downloads == 0:
+                    logger.debug("bina.no_downloads_today retailer=%s tab=%s trying_without_date_filter", retailer_id, tab)
+                    tab_downloads = await bina_fallback_click_downloads(
+                        page, frame, retailer_id, seen_hashes, seen_names, run_id, result, 
+                        max_files=0, throttle_ms=200, filter_today=False  # Try without date filter
+                    )
+                
                 got += tab_downloads
                 if tab_downloads > 0:
                     break

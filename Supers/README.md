@@ -3,73 +3,29 @@
 ## What it does
 - Crawls Israeli retailers for price data using Playwright automation
 - Supports multiple retailer types: PublishedPrices (Cerberus), Bina Projects, and generic public sites
-- Downloads files (ZIP/GZ/XML) and uploads to Google Cloud Storage
-- Parses XML files to JSONL format for analysis
-- Provides HTTP API for triggering crawls
+- Downloads files (ZIP/GZ/XML) and parses them directly
+- Saves parsed data to PostgreSQL database
+- Runs automatically via GitHub Actions
 
 ## Features
 - **Multi-adapter architecture** for different retailer types
 - **Authentication support** for protected sites (PublishedPrices)
 - **Folder navigation** for retailers like Super Yuda
 - **Duplicate detection** using MD5 hashes
-- **Manifest generation** with file metadata
-- **Structured logging** for Cloud Run compatibility
-
-## HTTP Endpoints
-- `POST /run` - Trigger crawler (async, returns immediately)
-  - Returns `200 OK` instantly with `{"status": "accepted", ...}`
-  - Starts crawler in background thread
-  - Designed for Cloud Scheduler (no timeout/503 errors)
-- `GET /health` - Health check
-- `GET /version` - Version info (legacy)
-- `GET /__version` - Active version (RELEASE/COMMIT_SHA)
-- `GET /__env` - Environment variables (non-sensitive)
-- `POST /__smoke` - GCS smoke test (uploads test file to bucket)
-- `GET /retailers` - Debug retailer discovery
-
-### /run Endpoint Behavior
-
-**Important**: The `/run` endpoint is **async-safe** and returns immediately:
-
-1. Client (Cloud Scheduler) calls `/run?group=public`
-2. Endpoint validates config and starts crawler in background thread
-3. Returns `200 OK` **immediately** (within milliseconds)
-4. Crawler runs in background, uploads to GCS, logs to Cloud Run
-5. Client is not blocked waiting for crawl to complete
-
-**Response format**:
-```json
-{
-  "status": "accepted",
-  "message": "Crawler started in background",
-  "group": "public",
-  "retailers_count": 15
-}
-```
-
-**Why this matters**:
-- Cloud Scheduler won't timeout or return 503 errors
-- Cold starts don't cause request failures
-- Multiple scheduler jobs can run concurrently without blocking each other
+- **Direct database storage** - no intermediate file storage
+- **Structured logging** for debugging and monitoring
+- **Memory monitoring** to track resource usage
 
 ## Environment Variables
 
 ### Required
-- `GCS_BUCKET` - Google Cloud Storage bucket name (preferred)
+- `DATABASE_URL` - PostgreSQL connection string (saves parsed data to database)
 - `RETAILER_CREDS_JSON` - JSON object with retailer credentials
 
 ### Optional
-- `PRICES_BUCKET` or `BUCKET_NAME` - Fallback bucket names
 - `LOG_LEVEL` - Logging level (default: INFO)
-- `DATABASE_URL` - PostgreSQL connection string (saves parsed data to database)
 
 ## Configuration
-
-### Bucket Configuration
-The crawler accepts bucket configuration in order of preference:
-1. `GCS_BUCKET` (preferred)
-2. `PRICES_BUCKET` (legacy)
-3. `BUCKET_NAME` (legacy)
 
 ### Credentials
 Set `RETAILER_CREDS_JSON` as a JSON object mapping retailer keys to credentials:
@@ -86,259 +42,81 @@ Set `RETAILER_CREDS_JSON` as a JSON object mapping retailer keys to credentials:
 ## Usage
 
 ### Local Development
+
 ```bash
 # Set up environment
-export GCS_BUCKET=your-test-bucket
+export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
 export RETAILER_CREDS_JSON='{"cerberus":{"username":"USER","password":"PASS"}}'
 export LOG_LEVEL=INFO
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the application
-python app.py
-# or with gunicorn
-gunicorn app:app --bind 0.0.0.0:8080
+# Install Playwright browsers
+playwright install chromium
+
+# Run crawler for all retailers
+python run_crawler.py
+
+# Run crawler for specific retailer
+python run_crawler.py --retailer=shufersal
+
+# Run crawler for public retailers only (no login required)
+python run_crawler.py --type=public
+
+# Run crawler for authenticated retailers only
+python run_crawler.py --type=auth
 ```
 
-### Trigger Crawler
-```bash
-# Run all enabled retailers
-curl -X POST http://localhost:8080/run \
-  -H "Content-Type: application/json"
-
-# Run specific retailer
-curl -X POST http://localhost:8080/run \
-  -H "Content-Type: application/json" \
-  -d '{"retailer":"superyuda"}'
-
-# Dry run (no actual crawling)
-curl -X POST http://localhost:8080/run \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run":true}'
-```
-
-### Group-Based Crawling
-
-The `/run` endpoint supports a `group` query parameter to crawl only specific subsets of retailers:
-
-- **`/run?group=creds`** - Crawls only retailers that require credentials (PublishedPrices retailers with `tenantKey` or custom `creds_key`)
-- **`/run?group=public`** - Crawls only retailers that don't require credentials (public sites, Bina Projects, etc.)
-- **`/run`** (no group parameter) - Crawls all enabled retailers (default behavior)
-
-This allows splitting crawls into separate Cloud Scheduler jobs for better control and cost optimization:
+### Command Line Options
 
 ```bash
-# Crawl only credentialed retailers (PublishedPrices, etc.)
-curl -X POST "http://localhost:8080/run?group=creds" \
-  -H "Content-Type: application/json"
+# Single retailer
+python run_crawler.py --retailer=shufersal --timeout=300
 
-# Crawl only public retailers (Bina, generic sites, Wolt)
-curl -X POST "http://localhost:8080/run?group=public" \
-  -H "Content-Type: application/json"
+# Filter by type
+python run_crawler.py --type=public    # Public retailers only
+python run_crawler.py --type=auth      # Authenticated retailers only
+
+# Timeout (in minutes, default: 300 = 5 hours)
+python run_crawler.py --retailer=shufersal --timeout=60
 ```
 
-### Single Retailer Debugging
+## Automation
 
-For local debugging and testing, use the `slug` query parameter to target a single retailer:
+### GitHub Actions
 
-```bash
-# Debug a single retailer by slug
-curl -X POST "http://localhost:8080/run?slug=supercofix" \
-  -H "Content-Type: application/json"
+The crawler runs automatically via GitHub Actions:
 
-# Combine with group filter
-curl -X POST "http://localhost:8080/run?group=creds&slug=supercofix" \
-  -H "Content-Type: application/json"
-```
+- **Schedule:** Daily at 07:00 UTC
+- **Trigger:** Manual (`workflow_dispatch`) or scheduled
+- **Environment:** Ubuntu latest with Python 3.11
+- **Strategy:** Matrix strategy - each retailer runs in parallel
+- **Timeout:** 330 minutes per retailer (5.5 hours, buffer before GitHub's 6h limit)
 
-The manifest will contain only the specified retailer, making it easy to diagnose issues.
+**Workflow file:** `.github/workflows/daily-crawler.yml`
 
-### Manifest Analysis
+**To enable:**
+1. Add `DATABASE_URL` secret in GitHub Settings → Secrets
+2. Add `RETAILER_CREDS_JSON` secret (if using authenticated retailers)
+3. Push code to `main` branch
+4. Workflow runs automatically on schedule or can be triggered manually
 
-Use the manifest summarizer to quickly identify which retailers have issues:
+**Matrix Strategy:**
+- Each retailer runs in its own GitHub Actions job
+- Jobs run in parallel (up to GitHub Actions concurrency limits)
+- Failed jobs don't block other retailers (`fail-fast: false`)
 
-```bash
-python scripts/summarize_manifest.py manifests/20241201T123456Z-abc.json
-```
+## How It Works
 
-This outputs a table showing downloads, reasons for failures, and errors grouped by type.
-
-## Deployment
-
-### Automatic Deployment (GitHub → Cloud Build → Cloud Run)
-
-Each commit to `main` triggers a Cloud Build that:
-1. Builds Docker image tagged with `$COMMIT_SHA`
-2. Pushes to `gcr.io/$PROJECT_ID/supers:$COMMIT_SHA`
-3. Deploys to Cloud Run with 100% traffic
-4. Sets `RELEASE=$COMMIT_SHA` and `GCS_BUCKET=civic-ripsaw-466109-e2-crawler-data`
-
-### Manual Deployment
-
-Deploy manually with a unique tag:
-
-```bash
-chmod +x scripts/*.sh
-./scripts/deploy.sh
-```
-
-This will:
-- Build and push image with timestamp tag
-- Deploy to Cloud Run service `price-crawler` in `me-west1`
-- Set environment variables automatically
-
-### Verification
-
-Verify the deployed service:
-
-```bash
-./scripts/verify.sh
-```
-
-This checks:
-- `/__version` → Returns the release/tag you just deployed
-- `/__env` → Shows `GCS_BUCKET=civic-ripsaw-466109-e2-crawler-data`
-- `/__smoke` → Returns `ok:true` and creates a GCS object at `smoke/<version>/...`
-
-**Expected output:**
-- `/__version` shows the deployed tag
-- `/__env` shows `GCS_BUCKET` set correctly
-- `/__smoke` returns `{"ok": true, "bucket": "...", "key": "smoke/.../..."}`
-
-**Cloud Run Logs** should show:
-- `startup version=<tag>`
-- `bucket.config=civic-ripsaw-466109-e2-crawler-data`
-- `smoke.uploaded bucket=... key=...`
-
-### Cloud Scheduler Configuration
-
-**Cloud Run Configuration**:
-- **Region**: `me-west1`
-- **Memory**: `16Gi` (required to prevent OOM kills)
-- **CPU**: `4 vCPU` (supports concurrent Playwright browsers and parsing)
-- **Timeout**: `3600s` (1 hour)
-- **Concurrency**: 3 retailers crawled simultaneously (prevents memory exhaustion)
-
-**Cloud Scheduler**:
-- **Region**: Can be any region (cross-region calls are supported)
-- Cloud Scheduler may be in `europe-west1` or `me-west1` - both work fine
-- The `/run` endpoint returns immediately, so Scheduler doesn't wait for crawl completion
-
-#### Why 16Gi Memory?
-
-The crawler uses Playwright browsers which are memory-intensive:
-- Each browser instance: ~1-2 GB RAM
-- With 3 concurrent crawlers: ~3-6 GB
-- Peak usage with parsing/uploads: ~8-12 GB
-- **16Gi provides safe headroom** to prevent OOM container kills
-
-**Previous issue**: Running with 8Gi caused frequent OOM kills (`Container terminated on signal 9`), which caused 503 errors to Cloud Scheduler.
-
-**Memory Instrumentation**: The crawler now includes memory usage logging at key checkpoints:
-- Run start/end
-- Before/after each retailer
-- Before/after link collection
-- Before/after downloads
-
-Check logs for `mem.stats` entries to monitor actual memory usage and optimize resource allocation.
-
-#### Concurrency Limiting
-
-The crawler uses `asyncio.Semaphore(3)` to limit concurrent retailers:
-- Maximum 3 Playwright browsers running simultaneously
-- Prevents memory spikes from crawling 30+ retailers in parallel
-- Each retailer waits for a semaphore slot before starting
-
-#### Testing Scheduler Jobs
-
-```bash
-# Get the service URL
-SERVICE_URL=$(gcloud run services describe price-crawler \
-  --region me-west1 \
-  --format='value(status.url)')
-
-# Test the /run endpoint manually
-curl -X POST "${SERVICE_URL}/run?group=public" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)"
-
-# Should return immediately with:
-# {"status": "accepted", "message": "Crawler started in background", ...}
-```
-
-#### Troubleshooting 503 Errors
-
-If you see `URL_UNREACHABLE_UNREACHABLE_5xx` or 503 errors:
-
-1. **Check for OOM kills in Cloud Run logs**:
-   ```bash
-   gcloud logging read 'resource.type=cloud_run_revision 
-     AND resource.labels.service_name=price-crawler 
-     AND textPayload=~"Memory limit"' \
-     --limit=10 \
-     --format=json
-   ```
-   
-   If you see `Memory limit of X MiB exceeded` → Container is OOM-killed → Increase memory
-
-2. **Check Cloud Run resource configuration**:
-   ```bash
-   gcloud run services describe price-crawler \
-     --region me-west1 \
-     --format='value(spec.template.spec.containers[0].resources.limits)'
-   ```
-   
-   Should show: `memory: 16Gi, cpu: "4"`
-
-3. **Verify /run endpoint responds quickly**:
-   ```bash
-   curl -X POST "${SERVICE_URL}/run?group=public" \
-     -H "Authorization: Bearer $(gcloud auth print-identity-token)"
-   
-   # Should return in < 1 second with:
-   # {"status": "accepted", "message": "Crawler started in background", ...}
-   ```
-
-4. **Check Cloud Run logs** for `background.crawler.start` and `background.crawler.done` messages:
-   ```bash
-   gcloud logging read 'resource.type=cloud_run_revision 
-     AND resource.labels.service_name=price-crawler 
-     AND textPayload=~"background.crawler"' \
-     --limit=20 \
-     --format=json
-   ```
-
-## GCS Layout
-
-Files are uploaded with the following structure:
-```
-raw/
-  <retailer_id>/
-    <run_id>/
-      <filename>.zip
-      <filename>.xml
-      manifest.json
-```
-
-### Manifest Format
-Each run generates a `manifest.json` with file metadata:
-```json
-{
-  "run_id": "20241201T143022Z-abc12345",
-  "retailer_id": "superyuda",
-  "retailer_name": "סופר יודה",
-  "timestamp": "2024-12-01T14:30:22Z",
-  "files": [
-    {
-      "filename": "prices.xml",
-      "gcs_path": "raw/superyuda/20241201T143022Z-abc12345/prices.xml",
-      "md5_hex": "a1b2c3d4e5f6...",
-      "bytes": 1024000,
-      "ts": "2024-12-01T14:30:22Z"
-    }
-  ]
-}
-```
+1. **GitHub Actions** triggers workflow (scheduled or manual)
+2. **Playwright** opens browser and navigates to retailer websites
+3. **Downloads** price files (handles authentication for protected sites)
+4. **Parses** XML files in memory to extract:
+   - Products (barcode, name, brand, quantity, unit)
+   - Prices (regular and promotional)
+   - Stores (location, address, city)
+5. **Saves** all data directly to PostgreSQL database via `DATABASE_URL`
 
 ## Special Cases
 
@@ -350,12 +128,16 @@ Super Yuda requires navigation to the "Yuda" folder after login. The crawler:
 
 ### Duplicate Detection
 - Files are deduplicated by MD5 hash within each run
-- Each uploaded blob has `md5_hex` metadata set
 - Duplicate files are skipped and counted
+
+### Price Normalization
+- Store 89 saves prices in Agoras (×100) instead of Shekels
+- Automatically normalized: if price > 1000 and storeId is 89, divide by 100
 
 ## Logging
 
-The crawler uses structured logging suitable for Cloud Run:
+The crawler uses structured logging:
+
 ```
 2024-12-01T14:30:22Z INFO run.start run_id=20241201T143022Z-abc12345 retailers=5
 2024-12-01T14:30:22Z INFO mem.stats rss_mb=850.4 vms_mb=3200.0 note=run.start run_id=20241201T143022Z-abc12345
@@ -363,15 +145,14 @@ The crawler uses structured logging suitable for Cloud Run:
 2024-12-01T14:30:25Z INFO login.success retailer=publishedprices
 2024-12-01T14:30:26Z INFO folder.navigate retailer=publishedprices folder=Yuda
 2024-12-01T14:30:28Z INFO folder.navigate.success retailer=publishedprices folder=Yuda method=direct
-2024-12-01T14:30:30Z INFO upload.ok retailer=superyuda file=prices.xml gcs_path=raw/superyuda/20241201T143022Z-abc12345/prices.xml
-2024-12-01T14:30:32Z INFO manifest.written retailer=superyuda run_id=20241201T143022Z-abc12345 files=3
+2024-12-01T14:30:30Z INFO db.saved retailer=superyuda count=1234/1234
 ```
 
 ### Memory Monitoring
 
 The crawler includes memory usage instrumentation using `psutil` to track RAM consumption:
 
-**Memory log format**:
+**Memory log format:**
 ```
 mem.stats rss_mb=1470.2 vms_mb=4000.0 note=before_retailer id=shufersal
 ```
@@ -380,31 +161,70 @@ mem.stats rss_mb=1470.2 vms_mb=4000.0 note=before_retailer id=shufersal
 - `vms_mb`: Virtual Memory Size in MiB
 - `note`: Context describing when the measurement was taken
 
-**Checkpoints logged**:
+**Checkpoints logged:**
 - Run start/end (`run.start`, `run_all.done_before_manifest`)
 - Before/after each retailer (`before_retailer`, `after_retailer`)
 - Link collection phases (`bina.before_collect_links`, `generic.after_collect_links`)
 - Download phases (`bina.before_downloads`, `generic.after_downloads`)
 
-**Query memory logs**:
-```bash
-# Get all memory stats from recent runs
-gcloud logging read 'resource.type=cloud_run_revision 
-  AND resource.labels.service_name=price-crawler 
-  AND textPayload=~"mem.stats"' \
-  --limit=100 \
-  --format=json | jq -r '.[] | .textPayload' | grep "mem.stats"
+### Concurrency Limiting
 
-# Find peak memory usage
-gcloud logging read 'resource.type=cloud_run_revision 
-  AND resource.labels.service_name=price-crawler 
-  AND textPayload=~"mem.stats"' \
-  --limit=1000 \
-  --format=json | jq -r '.[] | .textPayload' | \
-  grep "mem.stats" | grep -oP 'rss_mb=\K[0-9.]+' | sort -n | tail -1
+The crawler uses `asyncio.Semaphore(3)` to limit concurrent retailers:
+- Maximum 3 Playwright browsers running simultaneously
+- Prevents memory spikes from crawling 30+ retailers in parallel
+- Each retailer waits for a semaphore slot before starting
+
+## Database Schema
+
+The crawler saves data to PostgreSQL with the following structure:
+
+- **Retailers** - Retailer information (slug, name, needCreds)
+- **Stores** - Store locations and details (externalId, name, city, address)
+- **Products** - Product catalog (barcode, name, brand, quantity, unit, isWeighted)
+- **Price Snapshots** - Historical price data (productId, retailerId, storeId, price, isOnSale, timestamp)
+
+See `NextJS/prisma/schema.prisma` for full schema definition.
+
+## Troubleshooting
+
+### Database Connection Issues
+- Verify your `DATABASE_URL` is correct
+- Ensure PostgreSQL is running and accessible
+- Check network connectivity to the database host
+
+### Memory Issues
+- Monitor `mem.stats` logs to track memory usage
+- If hitting limits, reduce concurrency (currently 3)
+- Consider running fewer retailers per job
+
+### Timeout Issues
+- Default timeout is 300 minutes (5 hours)
+- Increase with `--timeout` flag if needed
+- GitHub Actions has a 6-hour limit per job
+
+### Authentication Failures
+- Verify `RETAILER_CREDS_JSON` is correctly formatted
+- Check credentials in `data/retailers.json`
+- Ensure tenant keys match between config and credentials
+
+## Project Structure
+
 ```
-
-Use these logs to:
-- Verify actual memory usage vs. allocated resources
-- Identify memory leaks or growth patterns
-- Optimize Cloud Run memory allocation (reduce if consistently low, increase if hitting limits)
+Supers/
+├── crawler/              # Core crawling logic
+│   ├── adapters/        # Retailer-specific adapters
+│   │   ├── publishedprices.py
+│   │   ├── bina.py
+│   │   ├── generic.py
+│   │   └── wolt_dateindex.py
+│   ├── core.py          # Main crawler orchestration
+│   ├── db.py            # Database operations
+│   ├── parsers.py       # XML parsing logic
+│   ├── download.py      # File download utilities
+│   └── ...
+├── data/
+│   └── retailers.json   # Retailer configuration
+├── scripts/             # Utility scripts
+├── run_crawler.py       # Entry point for GitHub Actions
+└── requirements.txt     # Python dependencies
+```

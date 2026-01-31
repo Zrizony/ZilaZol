@@ -9,12 +9,22 @@ from .db import save_parsed_prices, save_parsed_stores
 
 
 def _first_text(elem, *paths) -> Optional[str]:
-    """Returns the RAW text found in paths. No cleaning/filtering."""
+    """Returns the RAW text found in paths. No cleaning/filtering.
+    Also checks element attributes if path ends with @attr."""
     for p in paths:
-        r = elem.find(p)
-        if r is not None and r.text:
-            t = r.text.strip()
-            if t: return t
+        # Check if this is an attribute path (e.g., "StoreId/@id")
+        if "/@" in p:
+            tag, attr = p.split("/@", 1)
+            r = elem.find(tag)
+            if r is not None and attr in r.attrib:
+                val = r.attrib[attr].strip()
+                if val: return val
+        else:
+            # Regular element text
+            r = elem.find(p)
+            if r is not None and r.text:
+                t = r.text.strip()
+                if t: return t
     return None
 
 
@@ -111,10 +121,20 @@ def parse_prices_xml(xml_bytes: bytes, company: str, store_id: str = None) -> Tu
         if extracted_address:
             store_metadata["address"] = extracted_address
     
-    # Log if we found store metadata
-    if store_metadata.get("address") or store_metadata.get("city"):
+    # Log store metadata extraction results (both success and failure for debugging)
+    has_address = bool(store_metadata.get("address"))
+    has_city = bool(store_metadata.get("city"))
+    has_name = bool(store_metadata.get("name"))
+    
+    if has_address or has_city or has_name:
         logger.info(f"parse_prices_xml extracted store metadata: store_id={store_metadata.get('store_id')} "
-                   f"city={store_metadata.get('city')} address={store_metadata.get('address')}")
+                   f"city={store_metadata.get('city')} address={store_metadata.get('address')} name={store_metadata.get('name')}")
+    else:
+        # Log when we DON'T find metadata - this helps debug why addresses are NULL
+        # Only log once per file to avoid spam, and only if we have a store_id
+        if store_metadata.get("store_id") or store_id:
+            logger.debug(f"parse_prices_xml no store metadata found: store_id={store_metadata.get('store_id') or store_id} "
+                        f"root_tag={root.tag if root is not None else 'unknown'}")
 
     # Use store_id from metadata if we found it and it wasn't passed in
     effective_store_id = store_metadata.get("store_id") or store_id

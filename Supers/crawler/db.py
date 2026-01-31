@@ -219,6 +219,12 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
     default_store_name = store_metadata.get("name") if store_metadata else None
     default_store_city = store_metadata.get("city") if store_metadata else None
     default_store_address = store_metadata.get("address") if store_metadata else None
+    
+    # Log store metadata availability for debugging
+    if store_metadata:
+        has_metadata = bool(default_store_city or default_store_address or default_store_name)
+        logger.debug(f"save_parsed_prices retailer={retailer_id} store_metadata_present={has_metadata} "
+                    f"city={bool(default_store_city)} address={bool(default_store_address)} name={bool(default_store_name)}")
 
     for row in rows:
         try:
@@ -236,6 +242,17 @@ async def save_parsed_prices(rows: List[Dict], retailer_id: str, retailer_name: 
         if ext_store_id:
             if ext_store_id in store_cache:
                 db_store_id = store_cache[ext_store_id]
+                # CRITICAL FIX: Always try to update store metadata even if cached
+                # This ensures that if we process multiple files and later files have address data,
+                # we update the store record instead of keeping NULL values
+                if default_store_city or default_store_address or default_store_name:
+                    await upsert_store(
+                        db_retailer_id, 
+                        ext_store_id,
+                        name=default_store_name,
+                        city=default_store_city,
+                        address=default_store_address
+                    )
             else:
                 # Use metadata from XML if available, otherwise just use store_id
                 db_store_id = await upsert_store(

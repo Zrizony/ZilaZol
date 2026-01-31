@@ -183,10 +183,27 @@ async def generic_adapter(page: Page, source: dict, retailer_id: str, seen_hashe
     
     try:
         # Navigate to page with proper wait conditions
-        await page.goto(source.get("url", ""), wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        # Additional wait for dynamic content
-        await page.wait_for_timeout(2000)
+        source_url = source.get("url", "")
+        try:
+            await page.goto(source_url, wait_until="domcontentloaded", timeout=60000)
+            # Log redirects for debugging
+            final_url = page.url
+            if final_url != source_url:
+                logger.info("generic.redirect retailer=%s from=%s to=%s", retailer_id, source_url, final_url)
+            
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            # Additional wait for dynamic content
+            await page.wait_for_timeout(2000)
+        except Exception as nav_error:
+            error_msg = str(nav_error)
+            # Check for timeout/connection errors
+            if "timeout" in error_msg.lower() or "net::err_connection" in error_msg.lower() or "navigation timeout" in error_msg.lower():
+                result.errors.append(f"connection_timeout:{source_url}")
+                logger.error("generic.connection_timeout retailer=%s url=%s error=%s", retailer_id, source_url, error_msg)
+                return result
+            else:
+                # Re-raise other navigation errors
+                raise
         
         # Collect download links with retry logic (filtered to today's date)
         log_memory(logger, f"generic.before_collect_links retailer={retailer_id}")
